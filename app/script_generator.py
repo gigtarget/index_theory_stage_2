@@ -8,10 +8,10 @@ from openai import OpenAI
 logger = logging.getLogger(__name__)
 
 VOICEOVER_PROMPT = """
-Create a YouTube video voiceover script for THIS slide/page only.
+Create a YouTube video voiceover script for THIS image only, keep simple easy to understand english and hinglish.
 
 STRICT RULES:
-- Use ONLY the data and information visible on this slide/page.
+- Use ONLY the data and information visible on this image.
 - DO NOT add any new data, assumptions, opinions, predictions, or external references.
 - Generate ONE separate script for this slide only.
 - Output ONLY the narration script with no labels, slide numbers, or metadata.
@@ -28,7 +28,7 @@ LANGUAGE RULES:
 - Hindi words MUST be written in proper हिंदी (Devanagari).
 - English words MUST remain in English.
 - No slang, jokes, emojis, or casual YouTube language.
-
+- Strictly no Special characters like "!@#$%^&*()_+"
 FORMAT:
 - Short, clear paragraphs suitable for voiceover narration.
 - Do NOT mention instructions or explain reasoning.
@@ -55,8 +55,8 @@ def generate_scripts_from_images(images: List[bytes], model: str) -> List[str]:
         if index == 1:
             page_prompt += (
                 "\n\nFIRST SLIDE REQUIREMENTS:"  # noqa: E501
-                "\n- Open with a warm greeting such as 'Welcome to the post market report.'"  # noqa: E501
-                "\n- Immediately anchor the narration to the visible data on this slide."  # noqa: E501
+                "\n- Open with a warm greeting about pre market report.'"  # noqa: E501
+                "\n- Immediately anchor the narration to the visible data on this slide keep it short and engaging, simple english no complex words."  # noqa: E501
             )
         if index == total_pages:
             page_prompt += (
