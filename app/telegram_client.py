@@ -1,7 +1,10 @@
+import logging
 import os
 from typing import Any, Dict, Optional
 
 import httpx
+
+logger = logging.getLogger(__name__)
 
 TELEGRAM_BASE_URL = "https://api.telegram.org"
 
@@ -17,7 +20,20 @@ class TelegramClient:
         await self.session.aclose()
 
     async def send_message(self, chat_id: int, text: str) -> None:
-        await self.session.post("/sendMessage", json={"chat_id": chat_id, "text": text})
+        logger.info("Sending Telegram message to chat_id=%s", chat_id)
+        try:
+            response = await self.session.post("/sendMessage", json={"chat_id": chat_id, "text": text})
+            response.raise_for_status()
+            data = response.json()
+        except httpx.HTTPError:
+            logger.exception("HTTP error while calling Telegram sendMessage")
+            raise
+
+        if not data.get("ok"):
+            logger.error("Telegram sendMessage responded with error: %s", data)
+            raise RuntimeError(f"Failed to send message: {data}")
+
+        logger.info("Telegram sendMessage succeeded for chat_id=%s", chat_id)
 
     async def get_file(self, file_id: str) -> Dict[str, Any]:
         response = await self.session.get("/getFile", params={"file_id": file_id})
