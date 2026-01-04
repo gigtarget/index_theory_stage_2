@@ -14,7 +14,7 @@ Telegram polling worker that converts uploaded PDF reports into per-slide voiceo
 ```
 TELEGRAM_BOT_TOKEN="<telegram bot token>"
 OPENAI_API_KEY="<openai api key>"
-OPENAI_MODEL="gpt-4o"
+OPENAI_MODEL="gpt-5.2"
 NODE_ENV="production"
 DATABASE_URL="<optional postgres url>"
 ```

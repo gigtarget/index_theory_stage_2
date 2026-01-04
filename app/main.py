@@ -19,7 +19,7 @@ from app.script_generator import generate_scripts_from_images
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-DEFAULT_MODEL_NAME = "gpt-4o"
+DEFAULT_MODEL_NAME = "gpt-5.2"
 
 
 def _get_model_name() -> str:
