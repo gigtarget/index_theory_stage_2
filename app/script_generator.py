@@ -14,6 +14,7 @@ STRICT RULES:
 - Use ONLY the data and information visible on this slide/page.
 - DO NOT add any new data, assumptions, opinions, predictions, or external references.
 - Generate ONE separate script for this slide only.
+- Output ONLY the narration script with no labels, slide numbers, or metadata.
 
 STYLE & TONE:
 - This is for a YouTube market analysis video.
@@ -45,17 +46,31 @@ def _build_client() -> OpenAI:
 def generate_scripts_from_images(images: List[bytes], model: str) -> List[str]:
     client = _build_client()
     scripts: List[str] = []
+    total_pages = len(images)
 
     for index, image in enumerate(images, start=1):
         logger.info("Calling OpenAI for page=%s model=%s", index, model)
         image_b64 = base64.b64encode(image).decode("utf-8")
+        page_prompt = VOICEOVER_PROMPT
+        if index == 1:
+            page_prompt += (
+                "\n\nFIRST SLIDE REQUIREMENTS:"  # noqa: E501
+                "\n- Open with a warm greeting such as 'Welcome to the post market report.'"  # noqa: E501
+                "\n- Immediately anchor the narration to the visible data on this slide."  # noqa: E501
+            )
+        if index == total_pages:
+            page_prompt += (
+                "\n\nFINAL SLIDE REQUIREMENTS:"  # noqa: E501
+                "\n- Close with an engaging outro inviting viewer input, feedback, or questions about the day's data."  # noqa: E501
+                "\n- Encourage the audience to react to insights across all slides without adding new information."  # noqa: E501
+            )
         result = client.chat.completions.create(
             model=model,
             messages=[
                 {
                     "role": "user",
                     "content": [
-                        {"type": "text", "text": VOICEOVER_PROMPT},
+                        {"type": "text", "text": page_prompt},
                         {
                             "type": "image_url",
                             "image_url": {
