@@ -1,4 +1,6 @@
 import os
+import logging
+=======
 from typing import Any, Dict, Optional
 
 from fastapi import FastAPI, HTTPException
@@ -8,6 +10,12 @@ from app.script_generator import generate_scripts_from_images
 from app.telegram_client import TelegramClient
 
 app = FastAPI(title="Slide Voiceover Bot")
+logger = logging.getLogger(__name__)
+
+
+def _build_telegram_client() -> TelegramClient:
+    """Helper to construct a Telegram client for each request scope."""
+    return TelegramClient()
 
 
 def _get_model_name() -> str:
@@ -29,6 +37,7 @@ def _validate_document(message: Dict[str, Any]) -> Optional[Dict[str, Any]]:
 
 
 async def _process_pdf(chat_id: int, file_id: str) -> None:
+    telegram = _build_telegram_client()
     telegram = TelegramClient()
     try:
         file_info = await telegram.get_file(file_id)
@@ -51,6 +60,45 @@ async def telegram_webhook(update: Dict[str, Any]):
     if not message:
         return {"ok": True}
 
+    chat_id = message.get("chat", {}).get("id")
+    if chat_id is None:
+        logger.warning("Received update without chat id: %s", update)
+        return {"ok": True}
+
+    text = (message.get("text") or "").strip()
+    if text.lower() in {"/start", "start"}:
+        telegram = _build_telegram_client()
+        try:
+            await telegram.send_message(
+                chat_id,
+                "Send me a PDF report. I'll split each page and reply with one slide script per message.",
+            )
+        finally:
+            await telegram.close()
+        return {"ok": True}
+
+    document = _validate_document(message)
+    if not document:
+        if text:
+            telegram = _build_telegram_client()
+            try:
+                await telegram.send_message(chat_id, "Please upload a PDF document to process.")
+            finally:
+                await telegram.close()
+        return {"ok": True}
+
+    try:
+        await _process_pdf(chat_id, document["file_id"])
+    except Exception as exc:  # pragma: no cover - logged to user
+        logger.exception("Failed to process PDF: %s", exc)
+        telegram = _build_telegram_client()
+        try:
+            await telegram.send_message(
+                chat_id,
+                "मैं अभी आपकी फ़ाइल प्रोसेस नहीं कर पाया। कृपया थोड़ी देर बाद पुनः प्रयास करें।",
+            )
+        finally:
+            await telegram.close()
     document = _validate_document(message)
     if not document:
         return {"ok": True}
@@ -59,6 +107,7 @@ async def telegram_webhook(update: Dict[str, Any]):
     try:
         await _process_pdf(chat_id, document["file_id"])
     except Exception as exc:  # pragma: no cover - logged to user
+      
         raise HTTPException(status_code=500, detail=str(exc))
 
     return {"ok": True}
