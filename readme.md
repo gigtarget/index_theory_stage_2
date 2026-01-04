@@ -1,11 +1,11 @@
 # Slide Voiceover Bot
 
-Telegram polling worker that converts uploaded PDF reports into per-slide voiceover scripts using Gemini vision models. Designed for Railway deployment.
+Telegram polling worker that converts uploaded PDF reports into per-slide voiceover scripts using OpenAI vision models. Designed for Railway deployment.
 
 ## Features
 - Telegram polling worker that accepts PDF documents.
 - Splits PDFs into page-aligned PNG images with PyMuPDF.
-- Generates one Hinglish voiceover script per page via Gemini using the supplied prompt rules.
+- Generates one Hinglish voiceover script per page via OpenAI using the supplied prompt rules.
 - Sends scripts back to the user as sequential Telegram messages with preserved slide order.
 
 ## Setup
@@ -13,11 +13,10 @@ Telegram polling worker that converts uploaded PDF reports into per-slide voiceo
 
 ```
 TELEGRAM_BOT_TOKEN="<telegram bot token>"
-GEMINI_API_KEY="<gemini api key>"
-GEMINI_MODEL="gemini-2.5-flash"
+OPENAI_API_KEY="<openai api key>"
+OPENAI_MODEL="gpt-4o"
 NODE_ENV="production"
 DATABASE_URL="<optional postgres url>"
-OPENAI_API_KEY="<optional openai api key>"
 ```
 
 2. Install dependencies:
