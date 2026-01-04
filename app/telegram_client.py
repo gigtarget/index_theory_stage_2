@@ -23,6 +23,9 @@ class TelegramClient:
         logger.info("Sending Telegram message to chat_id=%s", chat_id)
         try:
             response = await self.session.post("/sendMessage", json={"chat_id": chat_id, "text": text})
+            logger.debug(
+                "Telegram sendMessage response: status=%s, body=%s", response.status_code, response.text
+            )
             response.raise_for_status()
             data = response.json()
         except httpx.HTTPError:
@@ -36,16 +39,23 @@ class TelegramClient:
         logger.info("Telegram sendMessage succeeded for chat_id=%s", chat_id)
 
     async def get_file(self, file_id: str) -> Dict[str, Any]:
+        logger.info("Requesting Telegram file metadata for file_id=%s", file_id)
         response = await self.session.get("/getFile", params={"file_id": file_id})
+        logger.debug("Telegram getFile response: status=%s, body=%s", response.status_code, response.text)
         response.raise_for_status()
         data = response.json()
         if not data.get("ok"):
+            logger.error("Telegram getFile responded with error: %s", data)
             raise RuntimeError(f"Failed to fetch file: {data}")
+        logger.info("Fetched Telegram file metadata for file_id=%s", file_id)
         return data["result"]
 
     async def download_file(self, file_path: str) -> bytes:
         file_url = f"{TELEGRAM_BASE_URL}/file/bot{self.bot_token}/{file_path}"
+        logger.info("Downloading Telegram file from %s", file_url)
         async with httpx.AsyncClient() as client:
             response = await client.get(file_url)
+            logger.debug("Telegram file download response: status=%s", response.status_code)
             response.raise_for_status()
+            logger.info("Downloaded %s bytes from Telegram file", len(response.content))
             return response.content

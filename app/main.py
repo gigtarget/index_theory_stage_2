@@ -29,6 +29,7 @@ def _validate_document(message: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     document = message.get("document")
     if not document:
         return None
+    logger.debug("Validating document payload: keys=%s", list(document.keys()))
     mime_type = document.get("mime_type", "")
     file_name = document.get("file_name", "")
     if mime_type != "application/pdf" and not file_name.lower().endswith(".pdf"):
@@ -41,15 +42,20 @@ async def _process_pdf(chat_id: int, file_id: str) -> None:
     try:
         logger.info("Fetching file info for file_id=%s", file_id)
         file_info = await telegram.get_file(file_id)
+        logger.debug("File info payload: %s", file_info)
         pdf_bytes = await telegram.download_file(file_info["file_path"])
 
         with save_temp_pdf(pdf_bytes) as temp_pdf:
+            logger.info("Splitting PDF into images: path=%s, size=%s bytes", temp_pdf.name, len(pdf_bytes))
             images = split_pdf_to_images(temp_pdf.name)
 
+        logger.info("Generating scripts from %s slide images", len(images))
         scripts = generate_scripts_from_images(images, _get_model_name())
         for index, script in enumerate(scripts, start=1):
             header = f"Slide {index} Script\n"
+            logger.info("Sending generated script for slide %s", index)
             await telegram.send_message(chat_id, header + script)
+        logger.info("Completed PDF processing for chat_id=%s", chat_id)
     finally:
         await telegram.close()
 
