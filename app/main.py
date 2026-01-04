@@ -8,6 +8,7 @@ from app.pdf_processor import save_temp_pdf, split_pdf_to_images
 from app.script_generator import generate_scripts_from_images
 from app.telegram_client import TelegramClient
 
+logging.basicConfig(level=logging.INFO)
 app = FastAPI(title="Slide Voiceover Bot")
 logger = logging.getLogger(__name__)
 
@@ -38,6 +39,7 @@ def _validate_document(message: Dict[str, Any]) -> Optional[Dict[str, Any]]:
 async def _process_pdf(chat_id: int, file_id: str) -> None:
     telegram = _build_telegram_client()
     try:
+        logger.info("Fetching file info for file_id=%s", file_id)
         file_info = await telegram.get_file(file_id)
         pdf_bytes = await telegram.download_file(file_info["file_path"])
 
@@ -54,14 +56,18 @@ async def _process_pdf(chat_id: int, file_id: str) -> None:
 
 @app.post("/telegram/webhook")
 async def telegram_webhook(update: Dict[str, Any]):
+    logger.info("Received Telegram webhook update: %s", update)
+
     message = update.get("message") or update.get("edited_message")
     if not message:
+        logger.info("No message content found in update")
         return {"ok": True}
 
     chat_id = message.get("chat", {}).get("id")
+    logger.info("Parsed message: chat_id=%s, keys=%s", chat_id, list(message.keys()))
     if chat_id is None:
         logger.warning("Received update without chat id: %s", update)
-        return {"ok": True}
+        raise HTTPException(status_code=400, detail="chat_id missing")
 
     text = (message.get("text") or "").strip()
     if text.lower() in {"/start", "start"}:
@@ -77,6 +83,7 @@ async def telegram_webhook(update: Dict[str, Any]):
 
     document = _validate_document(message)
     if not document:
+        logger.info("No valid PDF document found; text length=%s", len(text))
         if text:
             telegram = _build_telegram_client()
             try:
@@ -84,6 +91,8 @@ async def telegram_webhook(update: Dict[str, Any]):
             finally:
                 await telegram.close()
         return {"ok": True}
+
+    logger.info("Processing PDF for chat_id=%s with file_id=%s", chat_id, document.get("file_id"))
 
     try:
         await _process_pdf(chat_id, document["file_id"])
