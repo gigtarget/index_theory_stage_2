@@ -1,6 +1,5 @@
-import os
 import logging
-=======
+import os
 from typing import Any, Dict, Optional
 
 from fastapi import FastAPI, HTTPException
@@ -38,7 +37,6 @@ def _validate_document(message: Dict[str, Any]) -> Optional[Dict[str, Any]]:
 
 async def _process_pdf(chat_id: int, file_id: str) -> None:
     telegram = _build_telegram_client()
-    telegram = TelegramClient()
     try:
         file_info = await telegram.get_file(file_id)
         pdf_bytes = await telegram.download_file(file_info["file_path"])
@@ -99,15 +97,7 @@ async def telegram_webhook(update: Dict[str, Any]):
             )
         finally:
             await telegram.close()
-    document = _validate_document(message)
-    if not document:
-        return {"ok": True}
-
-    chat_id = message["chat"]["id"]
-    try:
-        await _process_pdf(chat_id, document["file_id"])
-    except Exception as exc:  # pragma: no cover - logged to user
-      
+        # Surface the error to the caller for observability in logs/metrics
         raise HTTPException(status_code=500, detail=str(exc))
 
     return {"ok": True}
