@@ -2,7 +2,7 @@ import asyncio
 import logging
 import os
 
-from telegram import Update
+from telegram import Message, Update
 from telegram.ext import (
     Application,
     ApplicationBuilder,
@@ -19,15 +19,17 @@ from app.script_generator import generate_scripts_from_images
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-DEFAULT_MODEL_NAME = "gemini-2.5-flash"
+DEFAULT_MODEL_NAME = "gpt-4o"
 
 
 def _get_model_name() -> str:
-    return os.environ.get("GEMINI_MODEL") or DEFAULT_MODEL_NAME
+    return os.environ.get("OPENAI_MODEL") or DEFAULT_MODEL_NAME
 
 
-async def _send_message(context: ContextTypes.DEFAULT_TYPE, chat_id: int, text: str) -> None:
-    await context.bot.send_message(chat_id=chat_id, text=text)
+async def _send_message(
+    context: ContextTypes.DEFAULT_TYPE, chat_id: int, text: str
+) -> Message:
+    return await context.bot.send_message(chat_id=chat_id, text=text)
 
 
 async def _process_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -43,17 +45,25 @@ async def _process_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "Processing PDF for chat_id=%s with file_id=%s", chat_id, document.file_id
     )
 
-    if not os.environ.get("GEMINI_API_KEY"):
-        await _send_message(context, chat_id, "GEMINI_API_KEY is not set in Railway Variables.")
+    if not os.environ.get("OPENAI_API_KEY"):
+        await _send_message(context, chat_id, "OPENAI_API_KEY is not set in Railway Variables.")
         return
 
+    status_messages: list[Message] = []
+
     try:
+        status_messages.append(
+            await _send_message(context, chat_id, "Starting PDF download...")
+        )
         file = await context.bot.get_file(document.file_id)
         pdf_bytes = await file.download_as_bytearray()
         logger.info(
             "Completed file download for chat_id=%s bytes=%s", chat_id, len(pdf_bytes)
         )
 
+        status_messages.append(
+            await _send_message(context, chat_id, "Splitting PDF into slide images...")
+        )
         with save_temp_pdf(bytes(pdf_bytes)) as temp_pdf:
             logger.info(
                 "Splitting PDF into images: path=%s, size=%s bytes",
@@ -63,7 +73,13 @@ async def _process_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             images = split_pdf_to_images(temp_pdf.name)
 
         logger.info("PDF page count=%s", len(images))
-        logger.info("Generating scripts from %s slide images", len(images))
+        status_messages.append(
+            await _send_message(
+                context,
+                chat_id,
+                f"Generating scripts for {len(images)} slides using OpenAI...",
+            )
+        )
         scripts = generate_scripts_from_images(images, _get_model_name())
         for index, script in enumerate(scripts, start=1):
             header = f"Slide {index} Script\n"
@@ -75,6 +91,19 @@ async def _process_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         await _send_message(
             context, chat_id, f"Error: {exc}. Check Railway logs."
         )
+    finally:
+        if status_messages:
+            for status_message in status_messages:
+                try:
+                    await context.bot.delete_message(
+                        chat_id=chat_id, message_id=status_message.id
+                    )
+                except Exception:
+                    logger.exception(
+                        "Failed to delete status message id=%s for chat_id=%s",
+                        status_message.id,
+                        chat_id,
+                    )
 
 
 async def _handle_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:

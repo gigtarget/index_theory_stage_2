@@ -1,8 +1,9 @@
+import base64
 import logging
 import os
 from typing import List
 
-from google import genai
+from openai import OpenAI
 
 logger = logging.getLogger(__name__)
 
@@ -37,11 +38,11 @@ Output Format
 """.strip()
 
 
-def _build_client() -> genai.Client:
-    api_key = os.environ.get("GEMINI_API_KEY")
+def _build_client() -> OpenAI:
+    api_key = os.environ.get("OPENAI_API_KEY")
     if not api_key:
-        raise RuntimeError("GEMINI_API_KEY is not configured")
-    return genai.Client(api_key=api_key)
+        raise RuntimeError("OPENAI_API_KEY is not configured")
+    return OpenAI(api_key=api_key)
 
 
 def generate_scripts_from_images(images: List[bytes], model: str) -> List[str]:
@@ -49,14 +50,25 @@ def generate_scripts_from_images(images: List[bytes], model: str) -> List[str]:
     scripts: List[str] = []
 
     for index, image in enumerate(images, start=1):
-        logger.info("Calling Gemini for page=%s model=%s", index, model)
-        result = client.models.generate_content(
+        logger.info("Calling OpenAI for page=%s model=%s", index, model)
+        image_b64 = base64.b64encode(image).decode("utf-8")
+        result = client.chat.completions.create(
             model=model,
-            contents=[
-                genai.types.Part.from_bytes(data=image, mime_type="image/png"),
-                VOICEOVER_PROMPT,
+            messages=[
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": VOICEOVER_PROMPT},
+                        {
+                            "type": "image_url",
+                            "image_url": {
+                                "url": f"data:image/png;base64,{image_b64}",
+                            },
+                        },
+                    ],
+                }
             ],
         )
-        logger.info("Received Gemini response for page=%s", index)
-        scripts.append(result.text.strip())
+        logger.info("Received OpenAI response for page=%s", index)
+        scripts.append(result.choices[0].message.content.strip())
     return scripts
