@@ -1,7 +1,10 @@
+import logging
 import os
 from typing import List
 
 from google import genai
+
+logger = logging.getLogger(__name__)
 
 VOICEOVER_PROMPT = """
 You are a professional Indian stock market content writer and voiceover script specialist.
@@ -45,7 +48,8 @@ def generate_scripts_from_images(images: List[bytes], model: str) -> List[str]:
     client = _build_client()
     scripts: List[str] = []
 
-    for image in images:
+    for index, image in enumerate(images, start=1):
+        logger.info("Calling Gemini for page=%s model=%s", index, model)
         result = client.models.generate_content(
             model=model,
             contents=[
@@ -53,5 +57,6 @@ def generate_scripts_from_images(images: List[bytes], model: str) -> List[str]:
                 VOICEOVER_PROMPT,
             ],
         )
+        logger.info("Received Gemini response for page=%s", index)
         scripts.append(result.text.strip())
     return scripts
