@@ -15,22 +15,28 @@ def test_enforce_word_limit_truncates():
     assert len(truncated.split()) == 95
 
 
-def test_script_has_required_sections():
+def test_script_is_plain_narration():
     script = (
+        "Bold hook to draw you in."
+        " Two crisp points land clearly."
+        " Final thought that sticks."
+        " Next, we'll look at revenue growth and what's changing."
+    )
+    assert script_generator.script_is_plain_narration(script) is True
+
+
+def test_script_is_plain_narration_rejects_labels():
+    script = (
+        "Slide 2 Script\n"
         "Hook: opening line\n"
         "Key points: detail one. detail two.\n"
         "Takeaway: summary line.\n"
         "Transition: Next, we'll look at revenue growth."
     )
-    assert script_generator.script_has_required_sections(script) is True
+    assert script_generator.script_is_plain_narration(script) is False
 
 
 def test_transition_mentions_intent():
     intent = "revenue growth"
-    script = (
-        "Hook: intro\n"
-        "Key points: first. second.\n"
-        "Takeaway: wrap.\n"
-        "Transition: Next, we'll look at revenue growth and compare performance."
-    )
+    script = "Strong hook. Quick points share value. Next, we'll look at revenue growth and compare performance."
     assert script_generator.transition_mentions_intent(script, intent) is True

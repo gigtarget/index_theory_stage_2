@@ -6,7 +6,7 @@ Telegram polling worker that converts uploaded PDF reports into per-slide voiceo
 - Telegram polling worker that accepts PDF documents.
 - Splits PDFs into page-aligned PNG images with PyMuPDF.
 - Global outline pass that captures a throughline, per-slide intents, and optional glossary.
-- Two-stage per-slide generation: extract facts JSON then craft a structured narration with strict word limits.
+- Two-stage per-slide generation: extract facts JSON then craft a plain-text narration (hook, points, takeaway, transition) with strict word limits and no headings.
 - Generates one Hinglish voiceover script per page via OpenAI using the supplied prompt rules.
 - Writes outputs in `outputs/<job_id>/outline.json` and per-slide `scripts/` files (text + metadata).
 - Sends scripts back to the user as sequential Telegram messages with preserved slide order.

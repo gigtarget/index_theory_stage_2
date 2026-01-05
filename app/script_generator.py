@@ -2,6 +2,7 @@ import base64
 import json
 import logging
 import os
+import re
 import uuid
 from pathlib import Path
 from typing import Any, Dict, List, Optional, TypedDict
@@ -61,11 +62,15 @@ SCRIPT_PROMPT = """
 Write a Hinglish (Latin script) narration for this slide using ONLY the provided facts and outline context.
 Tone: professional, calm, engaging. No slang or emojis.
 
-STRUCTURE (exactly 4 labeled parts):
-Hook:
-Key points:
-Takeaway:
-Transition:
+OUTPUT FORMAT (no headings):
+- Provide plain narration text only; do not include labels or bullet headers.
+- Implied flow: hook line (1 sentence), 2-3 short sentences with key points, 1-sentence takeaway, then 1-sentence transition starting with “Next, we’ll look at …”.
+- Use simple English (CLB 8–9). Avoid complex vocabulary and keep sentences short.
+- Language must stay in Latin script (no Devanagari).
+
+SPECIAL SLIDE 1 RULE:
+- For slide 1, write a short welcome + hook about what this report will cover today. Do NOT say “this slide introduces”.
+- Keep it punchy; slide 1 should be brief unless real data is present.
 
 LENGTH RULES:
 - Target {target_words} words; never exceed {max_words} words.
@@ -73,9 +78,7 @@ LENGTH RULES:
 
 CONTENT RULES:
 - Stick to the facts; no new data or opinions.
-- Key points must be 2-3 short sentences.
 - Transition must reference the next slide intent to build continuity using the provided hint.
-- Language must stay in Latin script (no Devanagari).
 """.strip()
 
 
@@ -115,18 +118,53 @@ def _enforce_word_limit(text: str, max_words: int) -> tuple[str, bool]:
     return truncated, True
 
 
-def script_has_required_sections(text: str) -> bool:
+def _has_numeric_content(facts: SlideFacts) -> bool:
+    if facts.get("numbers_to_mention"):
+        return True
+    for point in facts.get("top_points", []):
+        if any(char.isdigit() for char in point):
+            return True
+    return False
+
+
+def _normalize_apostrophes(text: str) -> str:
+    return text.replace("’", "'").replace("‘", "'")
+
+
+def _find_transition_sentence(text: str) -> Optional[str]:
+    normalized = _normalize_apostrophes(text)
+    sentences = re.split(r"(?<=[.!?])\s+", normalized)
+    for sentence in sentences:
+        stripped = sentence.strip()
+        if not stripped:
+            continue
+        if stripped.lower().startswith("next, we'll look at"):
+            return stripped
+    for line in normalized.splitlines():
+        stripped = line.strip()
+        if stripped.lower().startswith("next, we'll look at"):
+            return stripped
+    return None
+
+
+def script_is_plain_narration(text: str) -> bool:
     lowered = text.lower()
-    return all(section in lowered for section in ["hook:", "key points:", "takeaway:", "transition:"])
+    banned_labels = ["hook:", "key points:", "takeaway:", "transition:"]
+    if any(label in lowered for label in banned_labels):
+        return False
+    for line in text.splitlines():
+        if line.strip().lower().startswith("slide"):
+            return False
+    return _find_transition_sentence(text) is not None
 
 
 def transition_mentions_intent(text: str, next_intent: str) -> bool:
-    transition_line = None
-    for line in text.splitlines():
-        if line.strip().lower().startswith("transition:"):
-            transition_line = line.lower()
-            break
-    return bool(transition_line and next_intent.lower() in transition_line)
+    if not next_intent:
+        return False
+    transition_sentence = _find_transition_sentence(text)
+    if not transition_sentence:
+        return False
+    return next_intent.lower() in transition_sentence.lower()
 
 
 def _parse_json_response(content: str) -> Any:
@@ -267,8 +305,15 @@ def generate_scripts_from_images(
         prev_intent = slide_intents.get(index - 1, "")
         next_intent = slide_intents.get(index + 1, "")
         facts = _generate_facts(client, image, model, index, prev_intent, next_intent)
-        script = _generate_script_from_facts(client, facts, model, outline, target_words, max_words)
-        script, truncated = _enforce_word_limit(script, max_words)
+        slide_target_words = target_words
+        slide_max_words = max_words
+        if facts["slide_index"] == 1 and not _has_numeric_content(facts):
+            slide_max_words = min(max_words, 70)
+            slide_target_words = min(target_words, 60)
+        script = _generate_script_from_facts(
+            client, facts, model, outline, slide_target_words, slide_max_words
+        )
+        script, truncated = _enforce_word_limit(script, slide_max_words)
         scripts.append(script)
 
         script_path = scripts_dir / f"slide_{index}.txt"
