@@ -104,9 +104,8 @@ async def _process_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             max_words=max_words,
         )
         for index, script in enumerate(scripts, start=1):
-            header = f"Slide {index} Script\n"
             logger.info("Sending generated script for slide %s", index)
-            await _send_message(context, chat_id, header + script)
+            await _send_message(context, chat_id, script)
         logger.info("Completed PDF processing for chat_id=%s", chat_id)
     except Exception as exc:  # pragma: no cover - logged to user
         logger.exception("Failed to process PDF for chat_id=%s: %s", chat_id, exc)

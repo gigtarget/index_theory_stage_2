@@ -2,7 +2,6 @@ import base64
 import json
 import logging
 import os
-import re
 import uuid
 from pathlib import Path
 from typing import Any, Dict, List, Optional, TypedDict
@@ -59,26 +58,28 @@ RULES:
 """.strip()
 
 SCRIPT_PROMPT = """
-Write a Hinglish (Latin script) narration for this slide using ONLY the provided facts and outline context.
-Tone: professional, calm, engaging. No slang or emojis.
+Write Hinglish (Latin script) narration using ONLY the provided facts and outline context.
+Professional, calm, engaging. SIMPLE English (CLB 8–9): short sentences, common words.
+Do NOT use complex words like: distinctly, preceding, reinforce, psychological, persistent, backdrop, framework, actionable plan, etc.
 
-OUTPUT FORMAT (no headings):
-- Provide plain narration text only; do not include labels or bullet headers.
-- Implied flow: hook line (1 sentence), 2-3 short sentences with key points, 1-sentence takeaway, then 1-sentence transition starting with “Next, we’ll look at …”.
-- Use simple English (CLB 8–9). Avoid complex vocabulary and keep sentences short.
+OUTPUT FORMAT (STRICT):
+- Return ONLY narration text. No titles. No headings. No labels.
+- Do NOT include: "Slide", "Hook:", "Key points:", "Takeaway:", "Transition:", "Part 1", "Ab Part", "Key takeaway:".
+- Use 5–7 short sentences total.
+- Last sentence MUST start exactly with: "Next, we’ll look at " and should naturally match the next slide intent.
+
+LENGTH:
+- Target {target_words} words; MAX {max_words} words.
+
+SLIDE 1 RULE:
+- If this is slide 1 (cover/title slide), DO NOT explain the slide.
+- Write a welcome + what viewers will get in this report + set today’s tone.
+- Keep it punchy: 45–70 words unless the slide clearly contains real data.
+
+CONTENT:
+- Stick to visible slide facts only. No opinions/predictions.
+- Never narrate tables row-by-row; summarize top 2–3 insights only.
 - Language must stay in Latin script (no Devanagari).
-
-SPECIAL SLIDE 1 RULE:
-- For slide 1, write a short welcome + hook about what this report will cover today. Do NOT say “this slide introduces”.
-- Keep it punchy; slide 1 should be brief unless real data is present.
-
-LENGTH RULES:
-- Target {target_words} words; never exceed {max_words} words.
-- Summarize tables instead of reading rows.
-
-CONTENT RULES:
-- Stick to the facts; no new data or opinions.
-- Transition must reference the next slide intent to build continuity using the provided hint.
 """.strip()
 
 
@@ -118,53 +119,46 @@ def _enforce_word_limit(text: str, max_words: int) -> tuple[str, bool]:
     return truncated, True
 
 
-def _has_numeric_content(facts: SlideFacts) -> bool:
-    if facts.get("numbers_to_mention"):
-        return True
-    for point in facts.get("top_points", []):
-        if any(char.isdigit() for char in point):
-            return True
-    return False
+BANNED_PHRASES = [
+    "slide",
+    "hook:",
+    "key points:",
+    "takeaway:",
+    "transition:",
+    "key takeaway:",
+    "part 1",
+    "part 2",
+    "ab part",
+]
 
 
-def _normalize_apostrophes(text: str) -> str:
-    return text.replace("’", "'").replace("‘", "'")
+def script_has_no_banned_labels(text: str) -> bool:
+    lowered = " ".join(text.lower().split())
+    if lowered.startswith("slide ") or " slide " in lowered:
+        return False
+    banned_checks = BANNED_PHRASES + ["slide 1", "slide 2", "slide 3"]
+    return not any(phrase in lowered for phrase in banned_checks)
 
 
-def _find_transition_sentence(text: str) -> Optional[str]:
-    normalized = _normalize_apostrophes(text)
-    sentences = re.split(r"(?<=[.!?])\s+", normalized)
-    for sentence in sentences:
-        stripped = sentence.strip()
-        if not stripped:
-            continue
-        if stripped.lower().startswith("next, we'll look at"):
-            return stripped
-    for line in normalized.splitlines():
-        stripped = line.strip()
-        if stripped.lower().startswith("next, we'll look at"):
-            return stripped
-    return None
+def find_transition_sentence(text: str) -> str:
+    normalized = text.replace("\n", " ")
+    candidates = [s.strip() for s in normalized.split(".") if s.strip()]
+    for sentence in candidates:
+        lowered = sentence.lower()
+        if lowered.startswith("next, we’ll look at") or lowered.startswith("next, we'll look at"):
+            return sentence
+    return ""
 
 
 def script_is_plain_narration(text: str) -> bool:
-    lowered = text.lower()
-    banned_labels = ["hook:", "key points:", "takeaway:", "transition:"]
-    if any(label in lowered for label in banned_labels):
+    if not script_has_no_banned_labels(text):
         return False
-    for line in text.splitlines():
-        if line.strip().lower().startswith("slide"):
-            return False
-    return _find_transition_sentence(text) is not None
+    return bool(find_transition_sentence(text))
 
 
 def transition_mentions_intent(text: str, next_intent: str) -> bool:
-    if not next_intent:
-        return False
-    transition_sentence = _find_transition_sentence(text)
-    if not transition_sentence:
-        return False
-    return next_intent.lower() in transition_sentence.lower()
+    t = find_transition_sentence(text).lower()
+    return bool(t and next_intent and next_intent.lower() in t)
 
 
 def _parse_json_response(content: str) -> Any:
@@ -305,15 +299,38 @@ def generate_scripts_from_images(
         prev_intent = slide_intents.get(index - 1, "")
         next_intent = slide_intents.get(index + 1, "")
         facts = _generate_facts(client, image, model, index, prev_intent, next_intent)
-        slide_target_words = target_words
-        slide_max_words = max_words
-        if facts["slide_index"] == 1 and not _has_numeric_content(facts):
-            slide_max_words = min(max_words, 70)
-            slide_target_words = min(target_words, 60)
+        effective_target = target_words
+        effective_max = max_words
+        if facts["slide_index"] == 1:
+            effective_target = min(target_words, 60)
+            effective_max = min(max_words, 70)
         script = _generate_script_from_facts(
-            client, facts, model, outline, slide_target_words, slide_max_words
+            client, facts, model, outline, effective_target, effective_max
         )
-        script, truncated = _enforce_word_limit(script, slide_max_words)
+
+        needs_regen = False
+        if not script_has_no_banned_labels(script):
+            needs_regen = True
+        transition_sentence = find_transition_sentence(script)
+        if not transition_sentence or (next_intent and not transition_mentions_intent(script, next_intent)):
+            needs_regen = True
+        if needs_regen:
+            logger.info("Repairing script for slide %s due to format issues", index)
+            repair_prompt = (
+                script
+                + "\n\nRewrite the script. Remove any labels/headers. Keep simple English. "
+                "Keep last sentence starting with ‘Next, we’ll look at …’."
+            )
+            result = client.chat.completions.create(
+                model=model,
+                messages=[
+                    {"role": "system", "content": SCRIPT_PROMPT.format(target_words=effective_target, max_words=effective_max)},
+                    {"role": "user", "content": repair_prompt},
+                ],
+            )
+            script = (result.choices[0].message.content or "").strip()
+
+        script, truncated = _enforce_word_limit(script, effective_max)
         scripts.append(script)
 
         script_path = scripts_dir / f"slide_{index}.txt"
