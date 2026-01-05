@@ -13,7 +13,11 @@ from telegram.ext import (
 )
 
 from app.pdf_processor import save_temp_pdf, split_pdf_to_images
-from app.script_generator import generate_scripts_from_images
+from app.script_generator import (
+    DEFAULT_MAX_WORDS,
+    DEFAULT_TARGET_WORDS,
+    generate_scripts_from_images,
+)
 
 
 logging.basicConfig(level=logging.INFO)
@@ -24,6 +28,18 @@ DEFAULT_MODEL_NAME = "gpt-5.2"
 
 def _get_model_name() -> str:
     return os.environ.get("OPENAI_MODEL") or DEFAULT_MODEL_NAME
+
+
+def _get_word_limits() -> tuple[int, int]:
+    try:
+        target = int(os.environ.get("TARGET_WORDS", DEFAULT_TARGET_WORDS))
+    except ValueError:
+        target = DEFAULT_TARGET_WORDS
+    try:
+        max_words = int(os.environ.get("MAX_WORDS", DEFAULT_MAX_WORDS))
+    except ValueError:
+        max_words = DEFAULT_MAX_WORDS
+    return target, max_words
 
 
 async def _send_message(
@@ -80,7 +96,13 @@ async def _process_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                 f"Generating scripts for {len(images)} slides using OpenAI...",
             )
         )
-        scripts = generate_scripts_from_images(images, _get_model_name())
+        target_words, max_words = _get_word_limits()
+        scripts = generate_scripts_from_images(
+            images,
+            _get_model_name(),
+            target_words=target_words,
+            max_words=max_words,
+        )
         for index, script in enumerate(scripts, start=1):
             header = f"Slide {index} Script\n"
             logger.info("Sending generated script for slide %s", index)
