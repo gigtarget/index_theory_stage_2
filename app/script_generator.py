@@ -65,16 +65,11 @@ Do NOT use complex words like: distinctly, preceding, reinforce, psychological, 
 OUTPUT FORMAT (STRICT):
 - Return ONLY narration text. No titles. No headings. No labels.
 - Do NOT include: "Slide", "Hook:", "Key points:", "Takeaway:", "Transition:", "Part 1", "Ab Part", "Key takeaway:".
-- Use 5–7 short sentences total.
+- {sentence_rule}
 - {transition_rule}
 
 LENGTH:
 - Target {target_words} words; MAX {max_words} words.
-
-SLIDE 1 RULE:
-- If this is slide 1 (cover/title slide), DO NOT explain the slide.
-- Write a welcome + what viewers will get in this report + set today’s tone.
-- Keep it punchy: 45–70 words unless the slide clearly contains real data.
 
 CONTENT:
 - Stick to visible slide facts only. No opinions/predictions.
@@ -90,7 +85,7 @@ OUTPUT FORMAT (STRICT):
 - Return ONLY narration text. No titles. No headings. No labels.
 - Do NOT include: "Slide", "Hook:", "Key points:", "Takeaway:", "Transition:", "Part 1", "Ab Part", "Key takeaway:".
 - Use 3–4 short sentences total: 2–3 punchy sentences plus a transition sentence.
-- Total length MUST stay between 30 and 45 words.
+- Total length MUST stay between 30 and 40 words.
 - Must include one strong hook line (a question or bold statement).
 - Avoid words: framework, frameworks, briefing, goal, tone, clear framework.
 - Last sentence MUST start exactly with: "Next, we’ll look at " and should naturally match the next slide intent.
@@ -141,6 +136,64 @@ def _enforce_word_limit(text: str, max_words: int) -> tuple[str, bool]:
     return truncated, True
 
 
+def _sentence_count(text: str) -> int:
+    normalized = text.replace("!", ".").replace("?", ".")
+    return len([s for s in normalized.split(".") if s.strip()])
+
+
+def _assess_content_density(facts: SlideFacts) -> dict[str, Any]:
+    top_points = [p for p in facts.get("top_points", []) if str(p).strip()]
+    numbers = [n for n in facts.get("numbers_to_mention", []) if str(n).strip()]
+    title = str(facts.get("title", ""))
+    num_points = len(top_points)
+    num_numbers = len(numbers)
+    title_len = len(title.strip())
+    total_chars = sum(len(p) for p in top_points) + sum(len(n) for n in numbers)
+    keyword_hit = num_numbers == 0 and any(k in title.lower() for k in LOW_CONTEXT_KEYWORDS)
+    is_low_context = (
+        num_numbers == 0
+        and (num_points <= 1)
+        and total_chars < 120
+    ) or keyword_hit
+    return {
+        "num_points": num_points,
+        "num_numbers": num_numbers,
+        "title_len": title_len,
+        "total_chars": total_chars,
+        "is_low_context": is_low_context,
+    }
+
+
+def _build_script_prompt(
+    target_words: int,
+    max_words: int,
+    transition_rule: str,
+    is_first: bool,
+    is_last: bool,
+    is_low_context: bool,
+) -> str:
+    sentence_rule = "Use 5–7 short sentences total."
+    low_context_block = ""
+    if is_low_context and not is_first and not is_last:
+        sentence_rule = "Use 2–3 short sentences total plus one transition line."
+        low_context_block = (
+            "\nLOW-CONTEXT FORMAT:\n"
+            "- 1 short setup line.\n"
+            "- 1 line that tells what’s coming.\n"
+            "- Include a transition starting with \"Next, we’ll look at\" unless this is the last slide.\n"
+            "- No dates unless clearly present and short. Keep simple English (CLB 8–9) and Hinglish Latin script.\n"
+            "- No labels/headers."
+        )
+    prompt_template = SCRIPT_PROMPT_SLIDE_1 if is_first else SCRIPT_PROMPT
+    formatted_prompt = prompt_template.format(
+        target_words=target_words,
+        max_words=max_words,
+        transition_rule=transition_rule,
+        sentence_rule=sentence_rule,
+    )
+    return formatted_prompt + low_context_block
+
+
 BANNED_PHRASES = [
     "slide",
     "hook:",
@@ -154,6 +207,9 @@ BANNED_PHRASES = [
     "ab hum part",
     "start kar rahe",
 ]
+
+BANNED_GREETINGS = ["welcome back", "welcome to", "hello", "hi everyone"]
+LOW_CONTEXT_KEYWORDS = ["part", "playbook", "headwinds", "section"]
 
 
 def script_has_no_banned_labels(text: str) -> bool:
@@ -194,10 +250,31 @@ def contains_risk_keyword(text: str) -> bool:
     return any(keyword in lowered for keyword in RISK_KEYWORDS)
 
 
-def validate_script_rules(text: str, is_last: bool, next_intent: str) -> tuple[bool, List[str]]:
+def contains_banned_greeting(text: str, allow_welcome_to: bool) -> bool:
+    lowered = text.lower()
+    for phrase in BANNED_GREETINGS:
+        if phrase == "welcome to" and allow_welcome_to:
+            continue
+        if phrase in lowered:
+            return True
+    return False
+
+
+def validate_script_rules(
+    text: str, is_last: bool, next_intent: str, is_first: bool, is_low_context: bool
+) -> tuple[bool, List[str]]:
     errors: List[str] = []
     lowered = text.lower()
     transition_sentence = find_transition_sentence(text)
+
+    if contains_banned_greeting(text, allow_welcome_to=is_first):
+        errors.append("banned greeting")
+
+    if is_low_context:
+        if _word_count(text) > 45:
+            errors.append("low-context word limit")
+        if _sentence_count(text) > 4:
+            errors.append("too many sentences for low-context")
 
     if is_last:
         if "next, we'll look at" in lowered or "next, we’ll look at" in lowered:
@@ -219,7 +296,7 @@ def validate_script_rules(text: str, is_last: bool, next_intent: str) -> tuple[b
 
 def slide_one_has_hook(text: str) -> bool:
     words = text.split()
-    if len(words) > 45:
+    if len(words) > 40:
         return False
     normalized = " ".join(words)
     if "?" in normalized:
@@ -331,6 +408,7 @@ def _generate_script_from_facts(
     max_words: int,
     is_first: bool,
     is_last: bool,
+    is_low_context: bool,
 ) -> str:
     slides = outline.get("slides", []) if isinstance(outline, dict) else []
     next_intent = ""
@@ -343,9 +421,8 @@ def _generate_script_from_facts(
         if is_last
         else "Last sentence MUST start exactly with: \"Next, we’ll look at \" and should naturally match the next slide intent."
     )
-    prompt_template = SCRIPT_PROMPT_SLIDE_1 if is_first else SCRIPT_PROMPT
-    formatted_prompt = prompt_template.format(
-        target_words=target_words, max_words=max_words, transition_rule=transition_rule
+    formatted_prompt = _build_script_prompt(
+        target_words, max_words, transition_rule, is_first, is_last, is_low_context
     )
     user_text = (
         f"Throughline: {outline.get('throughline', '')}\n"
@@ -387,21 +464,40 @@ def generate_scripts_from_images(
         prev_intent = slide_intents.get(index - 1, "")
         next_intent = slide_intents.get(index + 1, "")
         facts = _generate_facts(client, image, model, index, prev_intent, next_intent)
+        density = _assess_content_density(facts)
+        is_low_context = bool(density.get("is_low_context"))
         effective_target = target_words
         effective_max = max_words
         is_first = facts["slide_index"] == 1
         is_last = facts["slide_index"] == total_pages
         if is_first:
-            effective_target = 40
+            effective_target = 33
+            effective_max = 40
+        elif is_low_context and not is_last:
+            effective_target = 30
             effective_max = 45
         script = _generate_script_from_facts(
-            client, facts, model, outline, effective_target, effective_max, is_first, is_last
+            client,
+            facts,
+            model,
+            outline,
+            effective_target,
+            effective_max,
+            is_first,
+            is_last,
+            is_low_context,
         )
 
         needs_regen = False
         if not script_has_no_banned_labels(script):
             needs_regen = True
-        valid_content, _ = validate_script_rules(script, is_last=is_last, next_intent=next_intent)
+        valid_content, _ = validate_script_rules(
+            script,
+            is_last=is_last,
+            next_intent=next_intent,
+            is_first=is_first,
+            is_low_context=is_low_context,
+        )
         if not valid_content:
             needs_regen = True
         if needs_regen:
@@ -420,14 +516,17 @@ def generate_scripts_from_images(
                 messages=[
                     {
                         "role": "system",
-                        "content": (SCRIPT_PROMPT_SLIDE_1 if is_first else SCRIPT_PROMPT).format(
-                            target_words=effective_target,
-                            max_words=effective_max,
-                            transition_rule=(
+                        "content": _build_script_prompt(
+                            effective_target,
+                            effective_max,
+                            (
                                 "Last sentence must be a closing line (like/subscribe + risk reminder). Do NOT use ‘Next, we’ll look at …’."
                                 if is_last
                                 else "Last sentence MUST start exactly with: \"Next, we’ll look at \" and should naturally match the next slide intent."
                             ),
+                            is_first,
+                            is_last,
+                            is_low_context,
                         ),
                     },
                     {"role": "user", "content": repair_prompt},
@@ -445,6 +544,8 @@ def generate_scripts_from_images(
             "word_count": _word_count(script),
             "truncation_applied": truncated,
             "slide_intent_used": slide_intents.get(index, ""),
+            "is_low_context": is_low_context,
+            "content_density": density,
         }
         meta_path.write_text(json.dumps(meta_payload, indent=2), encoding="utf-8")
 
