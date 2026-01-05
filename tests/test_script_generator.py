@@ -53,3 +53,31 @@ def test_slide_one_word_limit_cap():
     truncated, applied = script_generator._enforce_word_limit(text, max_words=70)
     assert applied is True
     assert len(truncated.split()) == 70
+
+
+def test_slide_one_hook_and_word_cap():
+    script = (
+        "Aaj ka plan kya hai? Quick take: revenue steady, costs trimmed, mood upbeat. "
+        "Expect crisp pointers and grounded numbers to set the vibe. Next, we'll look at margin trends and what shifted."
+    )
+    assert script_generator._word_count(script) <= 45
+    assert script_generator.slide_one_has_hook(script) is True
+
+
+def test_last_slide_requires_cta_and_risk():
+    script = (
+        "Recap the key signals and avoid over-trading. We saw banks hold steady while volumes cooled. "
+        "Volatility softer but not gone. If this helped, like and subscribe, and trade light to protect capital."
+    )
+    is_valid, errors = script_generator.validate_script_rules(script, is_last=True, next_intent="")
+    assert is_valid is True
+    assert errors == []
+
+
+def test_middle_slide_needs_transition_and_no_cta():
+    script = (
+        "Growth slowed but services held up. Costs are easing, giving small relief. Next, we'll look at margin shifts across segments."
+    )
+    is_valid, errors = script_generator.validate_script_rules(script, is_last=False, next_intent="margin shifts across segments")
+    assert is_valid is True
+    assert errors == []

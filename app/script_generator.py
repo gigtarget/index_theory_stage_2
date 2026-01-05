@@ -66,7 +66,7 @@ OUTPUT FORMAT (STRICT):
 - Return ONLY narration text. No titles. No headings. No labels.
 - Do NOT include: "Slide", "Hook:", "Key points:", "Takeaway:", "Transition:", "Part 1", "Ab Part", "Key takeaway:".
 - Use 5–7 short sentences total.
-- Last sentence MUST start exactly with: "Next, we’ll look at " and should naturally match the next slide intent.
+- {transition_rule}
 
 LENGTH:
 - Target {target_words} words; MAX {max_words} words.
@@ -75,6 +75,28 @@ SLIDE 1 RULE:
 - If this is slide 1 (cover/title slide), DO NOT explain the slide.
 - Write a welcome + what viewers will get in this report + set today’s tone.
 - Keep it punchy: 45–70 words unless the slide clearly contains real data.
+
+CONTENT:
+- Stick to visible slide facts only. No opinions/predictions.
+- Never narrate tables row-by-row; summarize top 2–3 insights only.
+- Language must stay in Latin script (no Devanagari).
+""".strip()
+
+SCRIPT_PROMPT_SLIDE_1 = """
+Write Hinglish (Latin script) narration using ONLY the provided facts and outline context.
+Keep sentences crisp and high-energy.
+
+OUTPUT FORMAT (STRICT):
+- Return ONLY narration text. No titles. No headings. No labels.
+- Do NOT include: "Slide", "Hook:", "Key points:", "Takeaway:", "Transition:", "Part 1", "Ab Part", "Key takeaway:".
+- Use 3–4 short sentences total: 2–3 punchy sentences plus a transition sentence.
+- Total length MUST stay between 30 and 45 words.
+- Must include one strong hook line (a question or bold statement).
+- Avoid words: framework, frameworks, briefing, goal, tone, clear framework.
+- Last sentence MUST start exactly with: "Next, we’ll look at " and should naturally match the next slide intent.
+
+LENGTH:
+- Target {target_words} words; MAX {max_words} words.
 
 CONTENT:
 - Stick to visible slide facts only. No opinions/predictions.
@@ -129,6 +151,8 @@ BANNED_PHRASES = [
     "part 1",
     "part 2",
     "ab part",
+    "ab hum part",
+    "start kar rahe",
 ]
 
 
@@ -138,6 +162,10 @@ def script_has_no_banned_labels(text: str) -> bool:
         return False
     banned_checks = BANNED_PHRASES + ["slide 1", "slide 2", "slide 3"]
     return not any(phrase in lowered for phrase in banned_checks)
+
+
+CTA_KEYWORDS = ["like", "subscribe", "follow", "share"]
+RISK_KEYWORDS = ["risk", "capital", "stop", "position size"]
 
 
 def find_transition_sentence(text: str) -> str:
@@ -154,6 +182,56 @@ def script_is_plain_narration(text: str) -> bool:
     if not script_has_no_banned_labels(text):
         return False
     return bool(find_transition_sentence(text))
+
+
+def contains_cta_keyword(text: str) -> bool:
+    lowered = text.lower()
+    return any(keyword in lowered for keyword in CTA_KEYWORDS)
+
+
+def contains_risk_keyword(text: str) -> bool:
+    lowered = text.lower()
+    return any(keyword in lowered for keyword in RISK_KEYWORDS)
+
+
+def validate_script_rules(text: str, is_last: bool, next_intent: str) -> tuple[bool, List[str]]:
+    errors: List[str] = []
+    lowered = text.lower()
+    transition_sentence = find_transition_sentence(text)
+
+    if is_last:
+        if "next, we'll look at" in lowered or "next, we’ll look at" in lowered:
+            errors.append("last slide has next transition")
+        if not contains_cta_keyword(text):
+            errors.append("missing cta")
+        if not contains_risk_keyword(text):
+            errors.append("missing risk reminder")
+    else:
+        if not transition_sentence:
+            errors.append("missing transition")
+        if transition_sentence and next_intent and next_intent.lower() not in transition_sentence.lower():
+            errors.append("transition missing intent")
+        if contains_cta_keyword(text):
+            errors.append("cta too early")
+
+    return not errors, errors
+
+
+def slide_one_has_hook(text: str) -> bool:
+    words = text.split()
+    if len(words) > 45:
+        return False
+    normalized = " ".join(words)
+    if "?" in normalized:
+        return True
+    hook_phrases = [
+        "aaj ka plan",
+        "soch rahe ho",
+        "ready to jump",
+        "kya aap",
+    ]
+    lowered = normalized.lower()
+    return any(lowered.startswith(phrase) for phrase in hook_phrases)
 
 
 def transition_mentions_intent(text: str, next_intent: str) -> bool:
@@ -251,6 +329,8 @@ def _generate_script_from_facts(
     outline: Dict[str, Any],
     target_words: int,
     max_words: int,
+    is_first: bool,
+    is_last: bool,
 ) -> str:
     slides = outline.get("slides", []) if isinstance(outline, dict) else []
     next_intent = ""
@@ -258,7 +338,15 @@ def _generate_script_from_facts(
         if slide.get("index") == facts["slide_index"] + 1:
             next_intent = str(slide.get("intent", ""))
             break
-    formatted_prompt = SCRIPT_PROMPT.format(target_words=target_words, max_words=max_words)
+    transition_rule = (
+        "Last sentence must be a closing line (like/subscribe + risk reminder). Do NOT use ‘Next, we’ll look at …’."
+        if is_last
+        else "Last sentence MUST start exactly with: \"Next, we’ll look at \" and should naturally match the next slide intent."
+    )
+    prompt_template = SCRIPT_PROMPT_SLIDE_1 if is_first else SCRIPT_PROMPT
+    formatted_prompt = prompt_template.format(
+        target_words=target_words, max_words=max_words, transition_rule=transition_rule
+    )
     user_text = (
         f"Throughline: {outline.get('throughline', '')}\n"
         f"Current slide intent: {next((s.get('intent') for s in slides if s.get('index') == facts['slide_index']), '')}\n"
@@ -301,30 +389,47 @@ def generate_scripts_from_images(
         facts = _generate_facts(client, image, model, index, prev_intent, next_intent)
         effective_target = target_words
         effective_max = max_words
-        if facts["slide_index"] == 1:
-            effective_target = min(target_words, 60)
-            effective_max = min(max_words, 70)
+        is_first = facts["slide_index"] == 1
+        is_last = facts["slide_index"] == total_pages
+        if is_first:
+            effective_target = 40
+            effective_max = 45
         script = _generate_script_from_facts(
-            client, facts, model, outline, effective_target, effective_max
+            client, facts, model, outline, effective_target, effective_max, is_first, is_last
         )
 
         needs_regen = False
         if not script_has_no_banned_labels(script):
             needs_regen = True
-        transition_sentence = find_transition_sentence(script)
-        if not transition_sentence or (next_intent and not transition_mentions_intent(script, next_intent)):
+        valid_content, _ = validate_script_rules(script, is_last=is_last, next_intent=next_intent)
+        if not valid_content:
             needs_regen = True
         if needs_regen:
             logger.info("Repairing script for slide %s due to format issues", index)
             repair_prompt = (
                 script
                 + "\n\nRewrite the script. Remove any labels/headers. Keep simple English. "
-                "Keep last sentence starting with ‘Next, we’ll look at …’."
+                + (
+                    "End with a short CTA line (like/subscribe) plus risk reminder. Do not use ‘Next, we’ll look at …’."
+                    if is_last
+                    else "Keep last sentence starting with ‘Next, we’ll look at …’."
+                )
             )
             result = client.chat.completions.create(
                 model=model,
                 messages=[
-                    {"role": "system", "content": SCRIPT_PROMPT.format(target_words=effective_target, max_words=effective_max)},
+                    {
+                        "role": "system",
+                        "content": (SCRIPT_PROMPT_SLIDE_1 if is_first else SCRIPT_PROMPT).format(
+                            target_words=effective_target,
+                            max_words=effective_max,
+                            transition_rule=(
+                                "Last sentence must be a closing line (like/subscribe + risk reminder). Do NOT use ‘Next, we’ll look at …’."
+                                if is_last
+                                else "Last sentence MUST start exactly with: \"Next, we’ll look at \" and should naturally match the next slide intent."
+                            ),
+                        ),
+                    },
                     {"role": "user", "content": repair_prompt},
                 ],
             )
