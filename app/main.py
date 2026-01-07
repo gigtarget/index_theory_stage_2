@@ -27,7 +27,7 @@ DEFAULT_MODEL_NAME = "gpt-5.2"
 
 
 def _get_model_name() -> str:
-    return os.environ.get("OPENAI_MODEL") or DEFAULT_MODEL_NAME
+    return os.environ.get("MODEL_NAME") or os.environ.get("OPENAI_MODEL") or DEFAULT_MODEL_NAME
 
 
 def _get_word_limits() -> tuple[int, int]:
@@ -80,13 +80,20 @@ async def _process_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         status_messages.append(
             await _send_message(context, chat_id, "Splitting PDF into slide images...")
         )
-        with save_temp_pdf(bytes(pdf_bytes)) as temp_pdf:
+        temp_pdf_path = None
+        try:
+            temp_pdf = save_temp_pdf(bytes(pdf_bytes))
+            temp_pdf_path = temp_pdf.name
+            temp_pdf.close()
             logger.info(
                 "Splitting PDF into images: path=%s, size=%s bytes",
-                temp_pdf.name,
+                temp_pdf_path,
                 len(pdf_bytes),
             )
-            images = split_pdf_to_images(temp_pdf.name)
+            images = split_pdf_to_images(temp_pdf_path)
+        finally:
+            if temp_pdf_path and os.path.exists(temp_pdf_path):
+                os.remove(temp_pdf_path)
 
         logger.info("PDF page count=%s", len(images))
         status_messages.append(
@@ -117,12 +124,12 @@ async def _process_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             for status_message in status_messages:
                 try:
                     await context.bot.delete_message(
-                        chat_id=chat_id, message_id=status_message.id
+                        chat_id=chat_id, message_id=status_message.message_id
                     )
                 except Exception:
                     logger.exception(
                         "Failed to delete status message id=%s for chat_id=%s",
-                        status_message.id,
+                        status_message.message_id,
                         chat_id,
                     )
 
