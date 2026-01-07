@@ -22,7 +22,6 @@ def _parse_args() -> argparse.Namespace:
         "--model",
         default=os.environ.get("MODEL_NAME") or os.environ.get("OPENAI_MODEL", "gpt-5.2"),
     )
-    parser.add_argument("--job_id", default=None, help="Optional job identifier for outputs/")
     parser.add_argument("--target_words", type=int, default=DEFAULT_TARGET_WORDS)
     parser.add_argument("--max_words", type=int, default=DEFAULT_MAX_WORDS)
     return parser.parse_args()
@@ -43,15 +42,13 @@ def main(args: Optional[argparse.Namespace] = None) -> None:
         parsed.model,
         target_words=parsed.target_words,
         max_words=parsed.max_words,
-        job_id=parsed.job_id,
     )
+    full_script = "\n".join(scripts)
+    viewer_question = generate_viewer_question(full_script)
+    if viewer_question and scripts:
+        scripts[-1] = f"{scripts[-1]}\nComment below—{viewer_question}"
     for idx, script in enumerate(scripts, start=1):
         print(f"\n--- Slide {idx} ---\n{script}\n")
-
-    full_script = "\n".join(scripts)
-    viewer_question = generate_viewer_question(full_script, parsed.model)
-    if viewer_question:
-        print(f"Viewer question: {viewer_question}")
 
 
 if __name__ == "__main__":

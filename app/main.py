@@ -114,13 +114,14 @@ async def _process_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             target_words=target_words,
             max_words=max_words,
         )
+        full_script = "\n".join(scripts)
+        viewer_question = generate_viewer_question(full_script)
+        if viewer_question and scripts:
+            question_line = f"Comment below—{viewer_question}"
+            scripts[-1] = f"{scripts[-1]}\n{question_line}"
         for index, script in enumerate(scripts, start=1):
             logger.info("Sending generated script for slide %s", index)
             await _send_message(context, chat_id, script)
-        full_script = "\n".join(scripts)
-        viewer_question = generate_viewer_question(full_script, _get_model_name())
-        if viewer_question:
-            await _send_message(context, chat_id, f"Viewer question: {viewer_question}")
         logger.info("Completed PDF processing for chat_id=%s", chat_id)
     except Exception as exc:  # pragma: no cover - logged to user
         logger.exception("Failed to process PDF for chat_id=%s: %s", chat_id, exc)
