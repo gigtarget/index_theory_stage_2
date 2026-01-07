@@ -8,6 +8,7 @@ from app.script_generator import (
     DEFAULT_MAX_WORDS,
     DEFAULT_TARGET_WORDS,
     generate_scripts_from_images,
+    generate_viewer_question,
 )
 
 logging.basicConfig(level=logging.INFO)
@@ -46,6 +47,11 @@ def main(args: Optional[argparse.Namespace] = None) -> None:
     )
     for idx, script in enumerate(scripts, start=1):
         print(f"\n--- Slide {idx} ---\n{script}\n")
+
+    full_script = "\n".join(scripts)
+    viewer_question = generate_viewer_question(full_script, parsed.model)
+    if viewer_question:
+        print(f"Viewer question: {viewer_question}")
 
 
 if __name__ == "__main__":
