@@ -17,6 +17,7 @@ from app.script_generator import (
     DEFAULT_MAX_WORDS,
     DEFAULT_TARGET_WORDS,
     generate_scripts_from_images,
+    generate_viewer_question,
 )
 
 
@@ -93,7 +94,10 @@ async def _process_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             images = split_pdf_to_images(temp_pdf_path)
         finally:
             if temp_pdf_path and os.path.exists(temp_pdf_path):
-                os.remove(temp_pdf_path)
+                try:
+                    os.remove(temp_pdf_path)
+                except Exception:
+                    logger.exception("Failed to remove temp PDF at %s", temp_pdf_path)
 
         logger.info("PDF page count=%s", len(images))
         status_messages.append(
@@ -113,6 +117,10 @@ async def _process_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         for index, script in enumerate(scripts, start=1):
             logger.info("Sending generated script for slide %s", index)
             await _send_message(context, chat_id, script)
+        full_script = "\n".join(scripts)
+        viewer_question = generate_viewer_question(full_script, _get_model_name())
+        if viewer_question:
+            await _send_message(context, chat_id, f"Viewer question: {viewer_question}")
         logger.info("Completed PDF processing for chat_id=%s", chat_id)
     except Exception as exc:  # pragma: no cover - logged to user
         logger.exception("Failed to process PDF for chat_id=%s: %s", chat_id, exc)

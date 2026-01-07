@@ -9,6 +9,7 @@ Telegram polling worker that converts uploaded PDF reports into per-slide voiceo
 - Enforces English narration with Hindi words in Devanagari (no romanized Hindi).
 - Writes outputs in `outputs/<job_id>/scripts/` (text + metadata).
 - Sends scripts back to the user as sequential Telegram messages with preserved slide order.
+- Generates a separate viewer question from the full script after all slides are processed.
 
 ## Setup
 1. Create a `.env` file (or configure Railway variables) with:
@@ -37,6 +38,7 @@ python -m app.main
 ```
 
 Upload a PDF document to the bot to receive one text message per slide following the configured script prompt.
+After all slides are sent, the bot posts a separate "Viewer question" message.
 
 ### Environment variables
 - `TELEGRAM_BOT_TOKEN` (required): Telegram bot token.
@@ -53,3 +55,4 @@ python -m app.cli /path/to/report.pdf --target_words 80 --max_words 95
 ```
 
 Outputs are saved to `outputs/<job_id>/scripts/slide_<n>.txt` with matching `slide_<n>_meta.json` describing word counts and limits used.
+The CLI also prints a final "Viewer question" generated from the combined script.
