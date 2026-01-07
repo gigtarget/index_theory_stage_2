@@ -17,7 +17,10 @@ logger = logging.getLogger(__name__)
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Generate slide scripts from a PDF")
     parser.add_argument("pdf", help="Path to the PDF file")
-    parser.add_argument("--model", default=os.environ.get("OPENAI_MODEL", "gpt-5.2"))
+    parser.add_argument(
+        "--model",
+        default=os.environ.get("MODEL_NAME") or os.environ.get("OPENAI_MODEL", "gpt-5.2"),
+    )
     parser.add_argument("--job_id", default=None, help="Optional job identifier for outputs/")
     parser.add_argument("--target_words", type=int, default=DEFAULT_TARGET_WORDS)
     parser.add_argument("--max_words", type=int, default=DEFAULT_MAX_WORDS)
