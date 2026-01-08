@@ -9,6 +9,7 @@ Telegram polling worker that converts uploaded PDF reports into per-slide voiceo
 - Enforces English narration with Hindi words in Devanagari (no romanized Hindi).
 - Writes outputs in `outputs/<job_id>/scripts/` (text + metadata).
 - Sends scripts back to the user as sequential Telegram messages with preserved slide order.
+- Splits long Telegram messages safely for full-script output mode.
 - Generates a separate viewer question from the full script after all slides are processed.
 
 ## Setup
@@ -19,6 +20,11 @@ TELEGRAM_BOT_TOKEN="<telegram bot token>"
 OPENAI_API_KEY="<openai api key>"
 MODEL_NAME="gpt-5.2"  # optional (falls back to OPENAI_MODEL or default)
 HINDI_DEVANAGARI="1"  # optional (set to 0 to skip normalization)
+VOICE_STYLE="formal"  # optional (youtube|formal)
+OUTPUT_MODE="slides"  # optional (slides|full|both)
+OPENER_PROB="0.10"    # optional (youtube mode only)
+BRIDGE_PROB="0.20"    # optional (youtube mode only)
+HUMANIZE_FULL_SCRIPT="1"  # optional (youtube mode only)
 TARGET_WORDS="80"  # optional
 MAX_WORDS="95"     # optional
 NODE_ENV="production"
@@ -45,6 +51,21 @@ After all slides are sent, the bot posts a separate "Viewer question" message.
 - `OPENAI_API_KEY` (required): OpenAI API key for the vision model.
 - `MODEL_NAME` (optional): OpenAI model name (falls back to `OPENAI_MODEL`).
 - `HINDI_DEVANAGARI` (optional): set to `0` to skip Devanagari normalization.
+- `VOICE_STYLE` (optional): `formal` (default) or `youtube` for a human, short-line narration style.
+- `OUTPUT_MODE` (optional): `slides` (default), `full` (single continuous script), or `both`.
+- `OPENER_PROB` (optional): probability for optional openers in YouTube mode (default `0.10`).
+- `BRIDGE_PROB` (optional): probability for optional topic bridges in YouTube mode (default `0.20`).
+- `HUMANIZE_FULL_SCRIPT` (optional): `1` to run a second-pass YouTube humanizer for the full script (default `1` in YouTube mode).
+
+### Recommended Railway settings for YouTube mode
+```
+VOICE_STYLE=youtube
+OUTPUT_MODE=full
+HUMANIZE_FULL_SCRIPT=1
+OPENER_PROB=0.10
+BRIDGE_PROB=0.20
+HINDI_DEVANAGARI=0
+```
 
 ### CLI pipeline (outline + per-slide scripts)
 

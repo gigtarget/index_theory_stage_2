@@ -16,8 +16,10 @@ from app.pdf_processor import save_temp_pdf, split_pdf_to_images
 from app.script_generator import (
     DEFAULT_MAX_WORDS,
     DEFAULT_TARGET_WORDS,
+    _build_client,
     generate_scripts_from_images,
     generate_viewer_question,
+    humanize_full_script,
 )
 
 
@@ -43,10 +45,57 @@ def _get_word_limits() -> tuple[int, int]:
     return target, max_words
 
 
+def _get_voice_style() -> str:
+    style = os.environ.get("VOICE_STYLE", "formal").strip().lower()
+    if style not in {"formal", "youtube"}:
+        return "formal"
+    return style
+
+
+def _get_output_mode() -> str:
+    mode = os.environ.get("OUTPUT_MODE", "slides").strip().lower()
+    if mode not in {"slides", "full", "both"}:
+        return "slides"
+    return mode
+
+
+def _get_humanize_full_script() -> bool:
+    voice_style = _get_voice_style()
+    default_value = "1" if voice_style == "youtube" else "0"
+    return os.environ.get("HUMANIZE_FULL_SCRIPT", default_value) == "1"
+
+
 async def _send_message(
     context: ContextTypes.DEFAULT_TYPE, chat_id: int, text: str
 ) -> Message:
     return await context.bot.send_message(chat_id=chat_id, text=text)
+
+
+async def _send_long(
+    context: ContextTypes.DEFAULT_TYPE, chat_id: int, text: str, limit: int = 3500
+) -> None:
+    paragraphs = text.split("\n")
+    buffer: list[str] = []
+    buffer_len = 0
+    for paragraph in paragraphs:
+        chunk = paragraph.strip()
+        if len(chunk) > limit:
+            if buffer:
+                await _send_message(context, chat_id, "\n".join(buffer).strip())
+                buffer = []
+                buffer_len = 0
+            for i in range(0, len(chunk), limit):
+                await _send_message(context, chat_id, chunk[i : i + limit])
+            continue
+        extra = len(chunk) + (1 if buffer else 0)
+        if buffer_len + extra > limit and buffer:
+            await _send_message(context, chat_id, "\n".join(buffer).strip())
+            buffer = []
+            buffer_len = 0
+        buffer.append(chunk)
+        buffer_len += extra
+    if buffer:
+        await _send_message(context, chat_id, "\n".join(buffer).strip())
 
 
 async def _process_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -114,14 +163,28 @@ async def _process_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             target_words=target_words,
             max_words=max_words,
         )
+        voice_style = _get_voice_style()
+        output_mode = _get_output_mode()
         full_script = "\n".join(scripts)
-        viewer_question = generate_viewer_question(full_script)
-        if viewer_question and scripts:
-            question_line = f"Comment below—{viewer_question}"
-            scripts[-1] = f"{scripts[-1]}\n{question_line}"
-        for index, script in enumerate(scripts, start=1):
-            logger.info("Sending generated script for slide %s", index)
-            await _send_message(context, chat_id, script)
+        if voice_style != "youtube":
+            viewer_question = generate_viewer_question(full_script)
+            if viewer_question and scripts:
+                question_line = f"Comment below—{viewer_question}"
+                scripts[-1] = f"{scripts[-1]}\n{question_line}"
+                full_script = "\n".join(scripts)
+
+        if output_mode in ["full", "both"]:
+            full_payload = full_script
+            if _get_humanize_full_script() and voice_style == "youtube":
+                full_payload = humanize_full_script(
+                    full_payload, client=_build_client(), model_name=_get_model_name()
+                )
+            await _send_long(context, chat_id, full_payload)
+
+        if output_mode in ["slides", "both"]:
+            for index, script in enumerate(scripts, start=1):
+                logger.info("Sending generated script for slide %s", index)
+                await _send_message(context, chat_id, script)
         logger.info("Completed PDF processing for chat_id=%s", chat_id)
     except Exception as exc:  # pragma: no cover - logged to user
         logger.exception("Failed to process PDF for chat_id=%s: %s", chat_id, exc)

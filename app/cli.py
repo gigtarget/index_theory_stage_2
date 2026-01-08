@@ -44,9 +44,11 @@ def main(args: Optional[argparse.Namespace] = None) -> None:
         max_words=parsed.max_words,
     )
     full_script = "\n".join(scripts)
-    viewer_question = generate_viewer_question(full_script)
-    if viewer_question and scripts:
-        scripts[-1] = f"{scripts[-1]}\nComment below—{viewer_question}"
+    voice_style = os.environ.get("VOICE_STYLE", "formal").strip().lower()
+    if voice_style != "youtube":
+        viewer_question = generate_viewer_question(full_script)
+        if viewer_question and scripts:
+            scripts[-1] = f"{scripts[-1]}\nComment below—{viewer_question}"
     for idx, script in enumerate(scripts, start=1):
         print(f"\n--- Slide {idx} ---\n{script}\n")
 
