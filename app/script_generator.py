@@ -1,82 +1,32 @@
 import base64
-import hashlib
 import json
 import logging
 import os
-import random
 import re
 import uuid
-from collections import defaultdict
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import List
 
 from openai import OpenAI
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_TARGET_WORDS = 95
-DEFAULT_MAX_WORDS = 130
-SLIDE_ONE_MIN_WORDS = 40
-SLIDE_ONE_MAX_WORDS = 80
+DEFAULT_TARGET_WORDS = 70
+DEFAULT_MAX_WORDS = 90
+SLIDE_ONE_MIN_WORDS = 28
+SLIDE_ONE_MAX_WORDS = 60
 DEFAULT_MODEL_NAME = "gpt-5.2"
-
-CONNECTOR_BANK = [
-    "Let’s start with",
-    "Here’s the snapshot",
-    "Quick recap",
-    "Moving to",
-    "Next up",
-    "Let’s zoom in",
-    "The key takeaway",
-    "On sectors",
-    "On flows",
-    "Under the hood",
-    "For the next session",
-]
-
-TOPIC_BRIDGES: Dict[str, List[str]] = {
-    "indices": [
-        "अब indices का snapshot देखते हैं।",
-        "चलो indices का snapshot देखते हैं।",
-    ],
-    "flows": [
-        "अब flows—FII vs DII—देखते हैं।",
-        "अब FII बनाम DII के flows देखते हैं।",
-    ],
-    "sectors": [
-        "अब sectors पर चलते हैं।",
-        "अब sector-wise तस्वीर देखते हैं।",
-    ],
-    "gainers": [
-        "अब top gainers देखते हैं।",
-        "अब top movers देखते हैं।",
-    ],
-    "losers": [
-        "अब top losers देखते हैं।",
-        "अब laggards पर नज़र डालते हैं।",
-    ],
-    "breadth": [
-        "अब breadth और VIX से tone confirm करते हैं।",
-        "अब breadth और VIX से टोन confirm करते हैं।",
-    ],
-    "levels": [
-        "अब कल का playbook—key levels—देखते हैं।",
-        "अब key levels और pivots पर चलते हैं।",
-    ],
-}
-
-FALLBACK_BRIDGES = [
-    "चलिए, आगे बढ़ते हैं।",
-    "आगे चलते हैं।",
-]
 
 BASE_SYSTEM_PROMPT = """
 You are a professional video voiceover writer for Indian retail traders.
 Use ONLY the content visible on the slide image. Do not add external facts, data, or predictions.
 Do not infer macro effects or explanations unless explicitly written on the slide.
 No added opinions or forecasts. Keep it retail-friendly and professional.
-Tone: professional, slightly dramatic, confident. Keep language simple and natural.
-Do not read the slide verbatim; narrate the ideas in a smooth voiceover flow.
+Tone: professional, confident, crisp. Keep language simple and natural.
+Write 2-4 short spoken sentences per slide.
+Paraphrase the slide; do not read bullet lists verbatim.
+Avoid phrases like "this slide shows", "as per the slide", or "in this slide".
+No transitions, bridges, or references to other slides.
 Return ONLY the narration text. No headings, labels, or bullet points.
 """.strip()
 
@@ -84,31 +34,12 @@ BASE_SYSTEM_PROMPT_YOUTUBE = """
 You are a professional YouTube voiceover writer for Indian retail traders.
 Use ONLY the content visible on the slide image. Do not add external facts, data, or predictions.
 Do not infer causes or explanations unless explicitly written on the slide.
-Write in short, speakable lines with a natural, human rhythm.
-Avoid robotic phrasing, headings, labels, or bullet points.
-Do not read the slide verbatim; narrate the ideas in a smooth flow.
-Return ONLY the narration text.
+Write 2-4 short spoken sentences with a natural, human rhythm.
+Paraphrase the slide; do not read bullet lists verbatim.
+Avoid phrases like "this slide shows", "as per the slide", or "in this slide".
+No transitions, bridges, or references to other slides.
+Return ONLY the narration text. No headings, labels, or bullet points.
 """.strip()
-
-YOUTUBE_OPENERS = [
-    "",
-    "",
-    "",
-    "Alright.",
-    "Okay.",
-    "Quick look.",
-]
-
-YOUTUBE_BRIDGES: Dict[str, List[str]] = {
-    "indices": ["", "Now to the index picture.", "Moving to indices."],
-    "flows": ["", "Now to flows.", "Let’s check flows."],
-    "sectors": ["", "Now to sectors.", "Sector-wise next."],
-    "gainers": ["", "Now to top movers."],
-    "losers": ["", "Now to laggards."],
-    "breadth": ["", "Now to breadth and VIX."],
-    "levels": ["", "Now to key levels."],
-    "fallback": ["", "Moving ahead."],
-}
 
 BANNED_REPETITIVE_PHRASES = [
     "Let’s start with",
@@ -117,10 +48,6 @@ BANNED_REPETITIVE_PHRASES = [
     "Here’s the snapshot",
     "Here's the snapshot",
 ]
-
-DEFAULT_OPENER_PROB = 0.10
-DEFAULT_BRIDGE_PROB = 0.20
-
 
 def _build_client() -> OpenAI:
     api_key = os.environ.get("OPENAI_API_KEY")
@@ -138,16 +65,6 @@ def _get_voice_style() -> str:
     if style not in {"formal", "youtube"}:
         return "formal"
     return style
-
-
-def _get_probability(env_name: str, default_value: float) -> float:
-    raw = os.environ.get(env_name)
-    if raw is None:
-        return default_value
-    try:
-        return float(raw)
-    except ValueError:
-        return default_value
 
 
 def _hindi_instruction() -> str:
@@ -190,53 +107,6 @@ def _strip_leading_now(text: str) -> str:
     return re.sub(r"^\s*Now,?\s+", "", text, flags=re.IGNORECASE)
 
 
-def _select_opener(last_opener: Optional[str], cursor: int) -> tuple[str, int]:
-    if not CONNECTOR_BANK:
-        raise RuntimeError("Connector bank is empty")
-    opener = CONNECTOR_BANK[cursor % len(CONNECTOR_BANK)]
-    if last_opener and opener == last_opener:
-        cursor += 1
-        opener = CONNECTOR_BANK[cursor % len(CONNECTOR_BANK)]
-    return opener, cursor + 1
-
-
-def _select_bridge(
-    topic: str, last_bridge: Optional[str], cursors: Dict[str, int]
-) -> str:
-    options = TOPIC_BRIDGES.get(topic, FALLBACK_BRIDGES)
-    cursor = cursors[topic]
-    bridge = options[cursor % len(options)]
-    if last_bridge and bridge == last_bridge and len(options) > 1:
-        cursor += 1
-        bridge = options[cursor % len(options)]
-    cursors[topic] = cursor + 1
-    if last_bridge and bridge == last_bridge and options == FALLBACK_BRIDGES:
-        alternate = FALLBACK_BRIDGES[(cursor + 1) % len(FALLBACK_BRIDGES)]
-        bridge = alternate
-        cursors[topic] = cursor + 2
-    return bridge
-
-
-def _stable_job_seed(images: List[bytes]) -> str:
-    hasher = hashlib.sha256()
-    for image in images:
-        hasher.update(image)
-    return hasher.hexdigest()
-
-
-def _maybe_pick(
-    rng: random.Random, items: List[str], prob: float, last: Optional[str]
-) -> str:
-    if rng.random() > prob:
-        return ""
-    if not items:
-        return ""
-    options = [item for item in items if item != last]
-    if not options:
-        options = items
-    return rng.choice(options)
-
-
 def _digit_sequences(text: str) -> List[str]:
     return re.findall(r"\d[\d,.]*", text)
 
@@ -255,50 +125,6 @@ def _remove_repeated_phrases(text: str, phrases: List[str]) -> str:
         remainder = pattern.sub("", remainder)
         updated = f"{updated[:start]}{first}{remainder}"
     return re.sub(r"\s{2,}", " ", updated).strip()
-
-
-def _extract_slide_keywords(image: bytes, client: OpenAI, model_name: str) -> List[str]:
-    prompt = (
-        "Extract 3-6 short keywords or phrases from this slide only. "
-        "Use only words visible on the slide. "
-        "Return a comma-separated list, no extra text."
-    )
-    content = [
-        {"type": "text", "text": prompt},
-        {
-            "type": "image_url",
-            "image_url": {"url": f"data:image/png;base64,{_encode_image(image)}"},
-        },
-    ]
-    result = client.chat.completions.create(
-        model=model_name,
-        messages=[
-            {"role": "system", "content": "You extract keywords only."},
-            {"role": "user", "content": content},
-        ],
-    )
-    raw = (result.choices[0].message.content or "").strip()
-    keywords = re.split(r"[,\n;]+", raw)
-    return [kw.strip() for kw in keywords if kw.strip()]
-
-
-def _topic_from_keywords(keywords: List[str]) -> str:
-    text = " ".join(keywords).lower()
-    if any(term in text for term in ["index", "indices", "snapshot", "nifty", "sensex"]):
-        return "indices"
-    if any(term in text for term in ["flow", "flows", "fii", "dii", "fpi"]):
-        return "flows"
-    if any(term in text for term in ["sector", "sectors", "sectoral"]):
-        return "sectors"
-    if any(term in text for term in ["gainers", "top gainers", "movers", "top movers"]):
-        return "gainers"
-    if any(term in text for term in ["losers", "laggards", "top losers", "decliners"]):
-        return "losers"
-    if any(term in text for term in ["breadth", "vix", "advance", "decline"]):
-        return "breadth"
-    if any(term in text for term in ["levels", "pivot", "support", "resistance", "range"]):
-        return "levels"
-    return "fallback"
 
 
 def _generate_slide_body(
@@ -387,44 +213,11 @@ def generate_scripts_from_images(
     total_slides = len(images)
     job_identifier = uuid.uuid4().hex
     voice_style = _get_voice_style()
-    rng_seed = os.environ.get("JOB_ID") or _stable_job_seed(images)
-    rng = random.Random(rng_seed)
-    opener_prob = _get_probability("OPENER_PROB", DEFAULT_OPENER_PROB)
-    bridge_prob = _get_probability("BRIDGE_PROB", DEFAULT_BRIDGE_PROB)
     scripts_dir = Path("outputs") / job_identifier / "scripts"
     scripts_dir.mkdir(parents=True, exist_ok=True)
-    last_opener: Optional[str] = None
-    opener_cursor = 0
-    last_bridge: Optional[str] = None
-    bridge_cursors: Dict[str, int] = defaultdict(int)
-
-    keywords_by_slide = []
-    for index, image in enumerate(images, start=1):
-        logger.info("Extracting keywords for slide %s/%s", index, total_slides)
-        keywords_by_slide.append(_extract_slide_keywords(image, client, model_name))
 
     for index, image in enumerate(images, start=1):
         logger.info("Generating script for slide %s/%s", index, total_slides)
-        opener = None
-        if index >= 2 and voice_style != "youtube":
-            opener, opener_cursor = _select_opener(last_opener, opener_cursor)
-            last_opener = opener
-        elif index >= 2 and voice_style == "youtube":
-            opener = _maybe_pick(rng, YOUTUBE_OPENERS, opener_prob, last_opener)
-            if opener:
-                last_opener = opener
-
-        next_keywords = keywords_by_slide[index] if index < total_slides else []
-        topic = _topic_from_keywords(next_keywords)
-        bridge_line = ""
-        if index < total_slides and voice_style != "youtube":
-            bridge_line = _select_bridge(topic, last_bridge, bridge_cursors)
-            last_bridge = bridge_line
-        elif index < total_slides and voice_style == "youtube":
-            bridge_options = YOUTUBE_BRIDGES.get(topic, YOUTUBE_BRIDGES["fallback"])
-            bridge_line = _maybe_pick(rng, bridge_options, bridge_prob, last_bridge)
-            if bridge_line:
-                last_bridge = bridge_line
 
         if index == 1 and voice_style != "youtube":
             slide_target_words = max(
@@ -432,21 +225,17 @@ def generate_scripts_from_images(
             )
             slide_max_words = min(max_words, SLIDE_ONE_MAX_WORDS)
             welcome_line = "नमस्ते! Welcome to Index Theory’s Post Market Report."
-            outline_line = (
-                "We’ll cover indices, flows, sectors, breadth, and key levels—only from today’s slides."
-            )
-            kickoff_line = f"{bridge_line} चलिए, शुरू करते हैं।".strip()
-            fixed_words = _word_count(f"{welcome_line} {outline_line} {kickoff_line}")
+            fixed_words = _word_count(welcome_line)
             body_target = max(10, slide_target_words - fixed_words)
             body_max = max(12, slide_max_words - fixed_words)
             body_instruction = (
-                "Provide 1-2 short sentences summarizing only this slide. "
-                "Do not add greetings, outlines, transitions, or CTA."
+                "Provide 2-3 short sentences summarizing only this slide. "
+                "Do not add outlines, transitions, or CTA."
             )
             body = _generate_slide_body(
                 image, client, model_name, body_instruction, body_target, body_max
             )
-            slide_lines = [welcome_line, outline_line, body, kickoff_line]
+            slide_lines = [welcome_line, body]
             script = "\n".join(line for line in slide_lines if line)
             script = _enforce_word_limit(script, SLIDE_ONE_MAX_WORDS)
         else:
@@ -454,26 +243,23 @@ def generate_scripts_from_images(
             slide_max_words = max_words
             if index == total_slides and voice_style != "youtube":
                 body_instruction = (
-                    "Provide a 1-2 line recap strictly from this slide. "
+                    "Provide 2-4 short sentences strictly from this slide. "
                     "Do NOT include any greeting, opener, transition, CTA, or viewer question."
                 )
             elif index == total_slides and voice_style == "youtube":
                 body_instruction = (
-                    "Provide a short recap strictly from this slide. "
+                    "Provide 2-4 short sentences strictly from this slide. "
                     "Do NOT include any greeting, opener, transition, CTA, or viewer question."
                 )
             else:
                 body_instruction = (
-                    "Do NOT include any greeting, opener, transition, or CTA. "
-                    "Write smooth narration from only the slide content."
+                    "Write 2-4 short sentences from only the slide content. "
+                    "Do NOT include any greeting, opener, transition, or CTA."
                 )
             body = _generate_slide_body(
                 image, client, model_name, body_instruction, slide_target_words, slide_max_words
             )
-            opener_text = f"{opener} " if opener else ""
-            script = f"{opener_text}{body}".strip()
-            if index < total_slides and bridge_line:
-                script = f"{script} {bridge_line}".strip()
+            script = body.strip()
             if index == total_slides and voice_style != "youtube":
                 cta_lines = [
                     "Like, Subscribe, and share your view in the comments.",
