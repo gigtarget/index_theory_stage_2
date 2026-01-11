@@ -285,18 +285,18 @@ async def _handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     text = message.text.strip().lower() if message and message.text else ""
     pending_images = context.chat_data.get("pending_images")
     if pending_images:
-        if text in {"confirm", "yes", "proceed", "go", "ok"}:
+        if text in {"/confirm", "yes", "proceed", "go", "ok"}:
             context.chat_data.pop("pending_images", None)
             asyncio.create_task(_generate_and_send_scripts(context, chat_id, pending_images))
             return
-        if text in {"cancel", "stop", "no"}:
+        if text in {"/cancel", "stop", "no"}:
             context.chat_data.pop("pending_images", None)
             await _send_message(context, chat_id, "Cancelled. No scripts were generated.")
             return
         await _send_message(
             context,
             chat_id,
-            "Reply CONFIRM to generate scripts, or CANCEL to discard.",
+            "Reply /confirm to generate scripts, or /cancel to discard.",
         )
         return
     await _send_message(context, chat_id, "Please upload a PDF document to process.")
