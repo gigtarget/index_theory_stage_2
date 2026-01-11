@@ -1,6 +1,8 @@
 import asyncio
 import logging
 import os
+from io import BytesIO
+from pathlib import Path
 
 from telegram import Message, Update
 from telegram.ext import (
@@ -12,7 +14,11 @@ from telegram.ext import (
     filters,
 )
 
-from app.pdf_processor import save_temp_pdf, split_pdf_to_images
+from app.pdf_processor import (
+    save_temp_pdf,
+    split_pdf_to_images,
+    watermark_images_with_logo,
+)
 from app.script_generator import (
     DEFAULT_MAX_WORDS,
     DEFAULT_TARGET_WORDS,
@@ -98,6 +104,72 @@ async def _send_long(
         await _send_message(context, chat_id, "\n".join(buffer).strip())
 
 
+async def _generate_and_send_scripts(
+    context: ContextTypes.DEFAULT_TYPE, chat_id: int, images: list[bytes]
+) -> None:
+    if not os.environ.get("OPENAI_API_KEY"):
+        await _send_message(context, chat_id, "OPENAI_API_KEY is not set in Railway Variables.")
+        return
+
+    status_messages: list[Message] = []
+    try:
+        status_messages.append(
+            await _send_message(
+                context,
+                chat_id,
+                f"Generating scripts for {len(images)} slides using OpenAI...",
+            )
+        )
+        target_words, max_words = _get_word_limits()
+        scripts = generate_scripts_from_images(
+            images,
+            _get_model_name(),
+            target_words=target_words,
+            max_words=max_words,
+        )
+        voice_style = _get_voice_style()
+        output_mode = _get_output_mode()
+        full_script = "\n".join(scripts)
+        if voice_style != "youtube":
+            viewer_question = generate_viewer_question(full_script)
+            if viewer_question and scripts:
+                question_line = f"Comment below—{viewer_question}"
+                scripts[-1] = f"{scripts[-1]}\n{question_line}"
+                full_script = "\n".join(scripts)
+
+        if output_mode in ["full", "both"]:
+            full_payload = full_script
+            if _get_humanize_full_script() and voice_style == "youtube":
+                full_payload = humanize_full_script(
+                    full_payload, client=_build_client(), model_name=_get_model_name()
+                )
+            await _send_long(context, chat_id, full_payload)
+
+        if output_mode in ["slides", "both"]:
+            for index, script in enumerate(scripts, start=1):
+                logger.info("Sending generated script for slide %s", index)
+                await _send_message(context, chat_id, script)
+        logger.info("Completed script generation for chat_id=%s", chat_id)
+    except Exception as exc:  # pragma: no cover - logged to user
+        logger.exception("Failed to generate scripts for chat_id=%s: %s", chat_id, exc)
+        await _send_message(
+            context, chat_id, f"Error: {exc}. Check Railway logs."
+        )
+    finally:
+        if status_messages:
+            for status_message in status_messages:
+                try:
+                    await context.bot.delete_message(
+                        chat_id=chat_id, message_id=status_message.message_id
+                    )
+                except Exception:
+                    logger.exception(
+                        "Failed to delete status message id=%s for chat_id=%s",
+                        status_message.message_id,
+                        chat_id,
+                    )
+
+
 async def _process_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     message = update.effective_message
     chat_id = update.effective_chat.id if update.effective_chat else None
@@ -149,42 +221,25 @@ async def _process_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                     logger.exception("Failed to remove temp PDF at %s", temp_pdf_path)
 
         logger.info("PDF page count=%s", len(images))
-        status_messages.append(
-            await _send_message(
-                context,
-                chat_id,
-                f"Generating scripts for {len(images)} slides using OpenAI...",
+        logo_path = (
+            Path(__file__).resolve().parents[1]
+            / "material"
+            / "index_theory_small_logo.png"
+        )
+        watermarked_images = watermark_images_with_logo(images, str(logo_path))
+        for index, image_bytes in enumerate(watermarked_images, start=1):
+            filename = f"slide_{index:02d}.png"
+            image_buffer = BytesIO(image_bytes)
+            image_buffer.name = filename
+            await context.bot.send_document(
+                chat_id=chat_id, document=image_buffer, filename=filename
             )
+        context.chat_data["pending_images"] = images
+        await _send_message(
+            context,
+            chat_id,
+            "Slides sent. Reply CONFIRM to generate scripts, or CANCEL to discard.",
         )
-        target_words, max_words = _get_word_limits()
-        scripts = generate_scripts_from_images(
-            images,
-            _get_model_name(),
-            target_words=target_words,
-            max_words=max_words,
-        )
-        voice_style = _get_voice_style()
-        output_mode = _get_output_mode()
-        full_script = "\n".join(scripts)
-        if voice_style != "youtube":
-            viewer_question = generate_viewer_question(full_script)
-            if viewer_question and scripts:
-                question_line = f"Comment below—{viewer_question}"
-                scripts[-1] = f"{scripts[-1]}\n{question_line}"
-                full_script = "\n".join(scripts)
-
-        if output_mode in ["full", "both"]:
-            full_payload = full_script
-            if _get_humanize_full_script() and voice_style == "youtube":
-                full_payload = humanize_full_script(
-                    full_payload, client=_build_client(), model_name=_get_model_name()
-                )
-            await _send_long(context, chat_id, full_payload)
-
-        if output_mode in ["slides", "both"]:
-            for index, script in enumerate(scripts, start=1):
-                logger.info("Sending generated script for slide %s", index)
-                await _send_message(context, chat_id, script)
         logger.info("Completed PDF processing for chat_id=%s", chat_id)
     except Exception as exc:  # pragma: no cover - logged to user
         logger.exception("Failed to process PDF for chat_id=%s: %s", chat_id, exc)
@@ -220,6 +275,24 @@ async def _handle_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 async def _handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     chat_id = update.effective_chat.id if update.effective_chat else None
     if chat_id is None:
+        return
+    message = update.effective_message
+    text = message.text.strip().lower() if message and message.text else ""
+    pending_images = context.chat_data.get("pending_images")
+    if pending_images:
+        if text in {"confirm", "yes", "proceed", "go", "ok"}:
+            context.chat_data.pop("pending_images", None)
+            asyncio.create_task(_generate_and_send_scripts(context, chat_id, pending_images))
+            return
+        if text in {"cancel", "stop", "no"}:
+            context.chat_data.pop("pending_images", None)
+            await _send_message(context, chat_id, "Cancelled. No scripts were generated.")
+            return
+        await _send_message(
+            context,
+            chat_id,
+            "Reply CONFIRM to generate scripts, or CANCEL to discard.",
+        )
         return
     await _send_message(context, chat_id, "Please upload a PDF document to process.")
 
