@@ -243,7 +243,7 @@ async def _process_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         await _send_message(
             context,
             chat_id,
-            "Slides sent. Reply CONFIRM to generate scripts, or CANCEL to discard.",
+            "Slides sent. Reply /confirm to generate scripts, or /cancel to discard.",
         )
         logger.info("Completed PDF processing for chat_id=%s", chat_id)
     except Exception as exc:  # pragma: no cover - logged to user
