@@ -5,6 +5,8 @@ from typing import List
 import fitz
 from PIL import Image
 
+WATERMARK_PADDING_PX = 0
+
 
 def split_pdf_to_images(pdf_path: str) -> List[bytes]:
     """Render each PDF page to a PNG image.
@@ -34,7 +36,8 @@ def add_logo_watermark_png(
     width_ratio: float = 0.12,
     min_logo_width: int = 80,
     max_logo_width: int = 320,
-    padding_ratio: float = 0.02,
+    padding_px: int | None = WATERMARK_PADDING_PX,
+    padding_ratio: float | None = None,
 ) -> bytes:
     base = Image.open(BytesIO(png_bytes)).convert("RGBA")
     logo = Image.open(logo_path).convert("RGBA")
@@ -46,7 +49,12 @@ def add_logo_watermark_png(
     target_height = max(1, int(logo.height * scale))
     logo = logo.resize((target_width, target_height), Image.LANCZOS)
 
-    padding = int(min(slide_width, slide_height) * padding_ratio)
+    if padding_px is not None:
+        padding = max(0, padding_px)
+    elif padding_ratio is not None:
+        padding = max(0, int(min(slide_width, slide_height) * padding_ratio))
+    else:
+        padding = 0
     x = max(0, slide_width - target_width - padding)
     y = max(0, slide_height - target_height - padding)
     base.paste(logo, (x, y), mask=logo)
@@ -56,5 +64,19 @@ def add_logo_watermark_png(
     return output.getvalue()
 
 
-def watermark_images_with_logo(images: List[bytes], logo_path: str) -> List[bytes]:
-    return [add_logo_watermark_png(image, logo_path) for image in images]
+def watermark_images_with_logo(
+    images: List[bytes],
+    logo_path: str,
+    *,
+    padding_px: int | None = WATERMARK_PADDING_PX,
+    padding_ratio: float | None = None,
+) -> List[bytes]:
+    return [
+        add_logo_watermark_png(
+            image,
+            logo_path,
+            padding_px=padding_px,
+            padding_ratio=padding_ratio,
+        )
+        for image in images
+    ]

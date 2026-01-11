@@ -15,6 +15,7 @@ from telegram.ext import (
 )
 
 from app.pdf_processor import (
+    WATERMARK_PADDING_PX,
     save_temp_pdf,
     split_pdf_to_images,
     watermark_images_with_logo,
@@ -226,7 +227,11 @@ async def _process_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             / "material"
             / "index_theory_small_logo.png"
         )
-        watermarked_images = watermark_images_with_logo(images, str(logo_path))
+        watermarked_images = watermark_images_with_logo(
+            images,
+            str(logo_path),
+            padding_px=WATERMARK_PADDING_PX,
+        )
         for index, image_bytes in enumerate(watermarked_images, start=1):
             filename = f"slide_{index:02d}.png"
             image_buffer = BytesIO(image_bytes)
