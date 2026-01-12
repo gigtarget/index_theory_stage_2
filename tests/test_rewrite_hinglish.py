@@ -99,6 +99,6 @@ def test_fallback_preserves_order_and_length():
         )
     )
 
-    assert result[0] == blocks[0]
+    assert result[0] == "EPS up FIVE% on strong demand."
     assert result[1] == "Guidance stays cautious but outlook measured."
     assert len(result) == len(blocks)
