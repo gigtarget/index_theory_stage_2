@@ -57,8 +57,7 @@ def test_unchanged_output_triggers_retry():
     assert client.chat.completions.index == 2
 
 
-def test_digit_guard_failure_retries_with_lower_temperature(monkeypatch):
-    monkeypatch.setenv("NUM_TO_WORDS_ENABLED", "false")
+def test_digit_guard_failure_retries_with_lower_temperature():
     block = "Revenue grew 10% while costs fell."
     outputs = [
         "Revenue grew while costs fell.",
@@ -81,10 +80,12 @@ def test_digit_guard_failure_retries_with_lower_temperature(monkeypatch):
     assert "Preserve numbers EXACTLY as written." in user_prompt
 
 
-def test_rewrite_all_blocks_preserves_order_and_length(monkeypatch):
-    monkeypatch.setenv("NUM_TO_WORDS_ENABLED", "true")
+def test_rewrite_all_blocks_preserves_order_and_length():
     blocks = ["EPS up 5% on strong demand.", "Guidance stays cautious."]
-    outputs = ["EPS up FIVE% on strong demand.", "Guidance stays cautious but outlook measured."]
+    outputs = [
+        "Demand stayed strong, with EPS up 5% overall.",
+        "Guidance stays cautious but outlook measured.",
+    ]
     client = DummyClient(outputs)
 
     result = asyncio.run(
@@ -96,6 +97,7 @@ def test_rewrite_all_blocks_preserves_order_and_length(monkeypatch):
         )
     )
 
-    assert result[0] == "EPS up FIVE% on strong demand."
+    assert result[0] == "Demand stayed strong, with EPS up 5% overall."
     assert result[1] == "Guidance stays cautious but outlook measured."
     assert len(result) == len(blocks)
+    assert "5%" in result[0]
