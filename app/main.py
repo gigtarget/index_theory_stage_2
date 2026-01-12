@@ -32,6 +32,7 @@ from app.rewrite_hinglish import rewrite_all_blocks, write_blocks
 
 
 logging.basicConfig(level=logging.INFO)
+logging.getLogger("httpx").setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
 
 DEFAULT_MODEL_NAME = "gpt-5.2"
