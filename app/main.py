@@ -35,6 +35,7 @@ from app.script_generator import (
 )
 from app.rewrite_hinglish import rewrite_all_blocks
 from app.text_postprocess import format_allcaps_words
+from app.tts import synthesize_tts_to_file
 
 
 logging.basicConfig(level=logging.INFO)
@@ -78,6 +79,52 @@ def _get_humanize_full_script() -> bool:
     voice_style = _get_voice_style()
     default_value = "1" if voice_style == "youtube" else "0"
     return os.environ.get("HUMANIZE_FULL_SCRIPT", default_value) == "1"
+
+
+def _get_tts_enabled() -> bool:
+    return os.environ.get("TTS_ENABLED", "true").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "y",
+    }
+
+
+def _get_tts_keep_files() -> bool:
+    return os.environ.get("TTS_KEEP_FILES", "true").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "y",
+    }
+
+
+def _get_tts_model() -> str:
+    return os.environ.get("TTS_MODEL", "gpt-4o-mini-tts").strip() or "gpt-4o-mini-tts"
+
+
+def _get_tts_voice() -> str:
+    return os.environ.get("TTS_VOICE", "cedar").strip() or "cedar"
+
+
+def _get_tts_format() -> str:
+    return os.environ.get("TTS_FORMAT", "mp3").strip().lower() or "mp3"
+
+
+def _get_tts_speed() -> float:
+    try:
+        return float(os.environ.get("TTS_SPEED", "1.0"))
+    except ValueError:
+        return 1.0
+
+
+def _get_tts_instructions() -> str | None:
+    instructions = os.environ.get(
+        "TTS_INSTRUCTIONS",
+        "Speak in a clear Indian-English market-news tone with natural Hinglish flow. "
+        "Keep pauses at commas and full-stops.",
+    ).strip()
+    return instructions or None
 
 
 def _get_instance_id() -> str:
@@ -142,6 +189,15 @@ async def _generate_and_send_scripts(
         total_slides = len(images)
         client = _build_client()
         scripts_dir, original_dir, hinglish_dir = create_scripts_job_dir()
+        tts_enabled = _get_tts_enabled()
+        tts_keep_files = _get_tts_keep_files()
+        tts_model = _get_tts_model()
+        tts_voice = _get_tts_voice()
+        tts_format = _get_tts_format()
+        tts_speed = _get_tts_speed()
+        tts_instructions = _get_tts_instructions()
+        tts_dir = Path("artifacts") / "tts"
+        tts_delay_seconds = 0.75
         scripts: list[str] = []
         hinglish_enabled = os.environ.get("ENABLE_HINGLISH_REWRITE", "true").strip().lower() in {
             "1",
@@ -248,6 +304,42 @@ async def _generate_and_send_scripts(
                 hinglish_path.write_text(hinglish_script, encoding="utf-8")
                 if output_mode in ["slides", "both"]:
                     await _send_long(context, chat_id, display_script)
+
+                if tts_enabled:
+                    tts_filename = f"hinglish_slide_{index:02d}.{tts_format}"
+                    tts_path = tts_dir / tts_filename
+                    try:
+                        tts_result = await asyncio.to_thread(
+                            synthesize_tts_to_file,
+                            hinglish_script,
+                            str(tts_path),
+                            model=tts_model,
+                            voice=tts_voice,
+                            response_format=tts_format,
+                            speed=tts_speed,
+                            instructions=tts_instructions,
+                        )
+                        if tts_result:
+                            with open(tts_result, "rb") as audio_file:
+                                await context.bot.send_audio(
+                                    chat_id=chat_id,
+                                    audio=audio_file,
+                                    filename=tts_filename,
+                                    caption=f"Hinglish Audio | Slide {index}",
+                                )
+                            await asyncio.sleep(tts_delay_seconds)
+                    except Exception as exc:  # pragma: no cover - logged for robustness
+                        logger.exception(
+                            "Failed to send TTS audio for slide %s: %s", index, exc
+                        )
+                    finally:
+                        if not tts_keep_files and tts_path.exists():
+                            try:
+                                tts_path.unlink()
+                            except Exception:
+                                logger.exception(
+                                    "Failed to delete TTS file at %s", tts_path
+                                )
 
         if output_mode in ["full", "both"]:
             full_payload = "\n".join(scripts)
