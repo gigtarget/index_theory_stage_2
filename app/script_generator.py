@@ -13,8 +13,8 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_TARGET_WORDS = 70
 DEFAULT_MAX_WORDS = 90
-SLIDE_ONE_MIN_WORDS = 28
-SLIDE_ONE_MAX_WORDS = 60
+SLIDE_ONE_MIN_WORDS = 18
+SLIDE_ONE_MAX_WORDS = 40
 DEFAULT_MODEL_NAME = "gpt-5.2"
 
 BASE_SYSTEM_PROMPT = """
@@ -239,13 +239,16 @@ def generate_script_for_slide(
         body_target = max(10, slide_target_words - fixed_words)
         body_max = max(12, slide_max_words - fixed_words)
         body_instruction = (
-            "Provide 2-3 short sentences summarizing only this slide. "
-            "Do not add outlines, transitions, or CTA."
+            "Provide exactly ONE short sentence stating today's theme and brief context "
+            "based only on this slide. Do NOT mention any date or brand line. "
+            "Do NOT add any opener, transition, or CTA."
         )
         body = _generate_slide_body(
             image, active_client, model_name, body_instruction, body_target, body_max
         )
-        slide_lines = [welcome_line, body]
+        theme_line = re.split(r"[.!?।]", body, maxsplit=1)[0].strip()
+        begin_line = "Lets begin."
+        slide_lines = [welcome_line, theme_line, begin_line]
         script = "\n".join(line for line in slide_lines if line)
         script = _enforce_word_limit(script, SLIDE_ONE_MAX_WORDS)
     else:
