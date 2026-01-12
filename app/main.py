@@ -2,10 +2,13 @@ import asyncio
 import json
 import logging
 import os
+import socket
+import uuid
 from io import BytesIO
 from pathlib import Path
 
 from telegram import Message, Update
+from telegram.error import Conflict
 from telegram.ext import (
     Application,
     ApplicationBuilder,
@@ -74,6 +77,12 @@ def _get_humanize_full_script() -> bool:
     voice_style = _get_voice_style()
     default_value = "1" if voice_style == "youtube" else "0"
     return os.environ.get("HUMANIZE_FULL_SCRIPT", default_value) == "1"
+
+
+def _get_instance_id() -> str:
+    hostname = socket.gethostname()
+    short_id = uuid.uuid4().hex[:8]
+    return f"{hostname}-{short_id}"
 
 
 async def _send_message(
@@ -196,16 +205,27 @@ async def _generate_and_send_scripts(
                         chat_id,
                         f"===== SLIDE {index}/{total_slides}: HINGLISH =====",
                     )
+                fallback_state = {"used": False}
+
+                async def _mark_fallback(slide_index: int, total: int, reason: str) -> None:
+                    fallback_state["used"] = True
+
                 hinglish_block = await rewrite_all_blocks(
                     [script],
                     client=client,
+                    on_slide_fallback=_mark_fallback,
+                    slide_indices=[index],
                 )
                 hinglish_script = hinglish_block[0] if hinglish_block else script
-                hinglish_scripts.append(hinglish_script)
+                if fallback_state["used"]:
+                    display_script = f"[HINGLISH FALLBACK USED] (model failed)\n{hinglish_script}"
+                else:
+                    display_script = hinglish_script
+                hinglish_scripts.append(display_script)
                 hinglish_path = hinglish_dir / f"slide_{index}.txt"
                 hinglish_path.write_text(hinglish_script, encoding="utf-8")
                 if output_mode in ["slides", "both"]:
-                    await _send_long(context, chat_id, hinglish_script)
+                    await _send_long(context, chat_id, display_script)
 
         if output_mode in ["full", "both"]:
             full_payload = "\n".join(scripts)
@@ -387,7 +407,15 @@ def _build_application() -> Application:
 
 def main() -> None:
     application = _build_application()
-    application.run_polling(drop_pending_updates=True)
+    instance_id = _get_instance_id()
+    logger.info("Starting Telegram bot polling. instance_id=%s", instance_id)
+    try:
+        application.run_polling(drop_pending_updates=True)
+    except Conflict:
+        logger.error(
+            "Another bot instance is running. Ensure only 1 replica/service is polling."
+        )
+        raise SystemExit(1)
 
 
 if __name__ == "__main__":

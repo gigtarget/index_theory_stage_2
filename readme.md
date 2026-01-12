@@ -28,8 +28,12 @@ OPENER_PROB="0.10"    # optional (youtube mode only)
 BRIDGE_PROB="0.20"    # optional (youtube mode only)
 HUMANIZE_FULL_SCRIPT="1"  # optional (youtube mode only)
 ENABLE_HINGLISH_REWRITE="true"  # optional
-HINGLISH_MODEL="gpt-5.2"  # optional
+HINGLISH_MODEL="gpt-4.1-mini"  # optional
 HINGLISH_TEMPERATURE="0.6"  # optional
+HINGLISH_FALLBACK_MODEL="gpt-4.1-mini"  # optional
+HINGLISH_MAX_COMPLETION_TOKENS="2048"  # optional
+HINGLISH_RETRY_MAX_COMPLETION_TOKENS="4096"  # optional
+HINGLISH_MAX_RETRIES="3"  # optional
 TARGET_WORDS="80"  # optional
 MAX_WORDS="95"     # optional
 NODE_ENV="production"
@@ -62,8 +66,12 @@ After all slides are sent, the bot posts a separate "Viewer question" message.
 - `BRIDGE_PROB` (optional): probability for optional topic bridges in YouTube mode (default `0.20`).
 - `HUMANIZE_FULL_SCRIPT` (optional): `1` to run a second-pass YouTube humanizer for the full script (default `1` in YouTube mode).
 - `ENABLE_HINGLISH_REWRITE` (optional): `true` to run a second-pass Hinglish rewrite per slide (default `true`).
-- `HINGLISH_MODEL` (optional): model name for Hinglish rewrite (defaults to `MODEL_NAME`/`OPENAI_MODEL`).
+- `HINGLISH_MODEL` (optional): model name for Hinglish rewrite (defaults to `MODEL_NAME`/`OPENAI_MODEL` or `gpt-4.1-mini`).
 - `HINGLISH_TEMPERATURE` (optional): sampling temperature for Hinglish rewrite (default `0.6`).
+- `HINGLISH_FALLBACK_MODEL` (optional): fallback model for Hinglish rewrite (default `gpt-4.1-mini`).
+- `HINGLISH_MAX_COMPLETION_TOKENS` (optional): max completion tokens for Hinglish rewrite (default `2048`).
+- `HINGLISH_RETRY_MAX_COMPLETION_TOKENS` (optional): retry max completion tokens for Hinglish rewrite (default `4096`).
+- `HINGLISH_MAX_RETRIES` (optional): max retries for Hinglish rewrite (default `3`).
 
 ### Recommended Railway settings for YouTube mode
 ```
