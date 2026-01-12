@@ -34,7 +34,7 @@ from app.script_generator import (
     humanize_full_script,
 )
 from app.rewrite_hinglish import rewrite_all_blocks
-from app.text_postprocess import lowercase_long_allcaps_words
+from app.text_postprocess import format_allcaps_words
 
 
 logging.basicConfig(level=logging.INFO)
@@ -194,7 +194,7 @@ async def _generate_and_send_scripts(
                             encoding="utf-8",
                         )
 
-            script = lowercase_long_allcaps_words(script)
+            script = format_allcaps_words(script)
             if scripts_dir:
                 script_path = scripts_dir / f"slide_{index}.txt"
                 script_path.write_text(script, encoding="utf-8")
@@ -235,7 +235,7 @@ async def _generate_and_send_scripts(
                     slide_indices=[index],
                 )
                 hinglish_script = hinglish_block[0] if hinglish_block else script
-                hinglish_script = lowercase_long_allcaps_words(hinglish_script)
+                hinglish_script = format_allcaps_words(hinglish_script)
                 if fallback_state["used"]:
                     if fallback_state["reason"] == "digits":
                         display_script = f"[HINGLISH FALLBACK USED: digits]\n{hinglish_script}"
