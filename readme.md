@@ -8,9 +8,11 @@ Telegram polling worker that converts uploaded PDF reports into per-slide voiceo
 - Generates one video-style voiceover script per page via OpenAI vision using strict prompt rules.
 - Enforces English narration with Hindi words in Devanagari (no romanized Hindi).
 - Writes outputs in `outputs/<job_id>/scripts/` (text + metadata).
+- Creates parallel script folders at `outputs/<job_id>/scripts/original/` and `outputs/<job_id>/scripts/hinglish/`.
 - Sends scripts back to the user as sequential Telegram messages with preserved slide order.
 - Splits long Telegram messages safely for full-script output mode.
 - Generates a separate viewer question from the full script after all slides are processed.
+- Optionally runs a second-pass Hinglish rewrite per slide and sends those scripts after the originals.
 
 ## Setup
 1. Create a `.env` file (or configure Railway variables) with:
@@ -25,6 +27,9 @@ OUTPUT_MODE="slides"  # optional (slides|full|both)
 OPENER_PROB="0.10"    # optional (youtube mode only)
 BRIDGE_PROB="0.20"    # optional (youtube mode only)
 HUMANIZE_FULL_SCRIPT="1"  # optional (youtube mode only)
+ENABLE_HINGLISH_REWRITE="true"  # optional
+HINGLISH_MODEL="gpt-5.2"  # optional
+HINGLISH_TEMPERATURE="0.6"  # optional
 TARGET_WORDS="80"  # optional
 MAX_WORDS="95"     # optional
 NODE_ENV="production"
@@ -56,6 +61,9 @@ After all slides are sent, the bot posts a separate "Viewer question" message.
 - `OPENER_PROB` (optional): probability for optional openers in YouTube mode (default `0.10`).
 - `BRIDGE_PROB` (optional): probability for optional topic bridges in YouTube mode (default `0.20`).
 - `HUMANIZE_FULL_SCRIPT` (optional): `1` to run a second-pass YouTube humanizer for the full script (default `1` in YouTube mode).
+- `ENABLE_HINGLISH_REWRITE` (optional): `true` to run a second-pass Hinglish rewrite per slide (default `true`).
+- `HINGLISH_MODEL` (optional): model name for Hinglish rewrite (defaults to `MODEL_NAME`/`OPENAI_MODEL`).
+- `HINGLISH_TEMPERATURE` (optional): sampling temperature for Hinglish rewrite (default `0.6`).
 
 ### Recommended Railway settings for YouTube mode
 ```
@@ -75,5 +83,5 @@ Run the generator locally against a PDF without Telegram:
 python -m app.cli /path/to/report.pdf --target_words 80 --max_words 95
 ```
 
-Outputs are saved to `outputs/<job_id>/scripts/slide_<n>.txt` with matching `slide_<n>_meta.json` describing word counts and limits used.
+Outputs are saved to `outputs/<job_id>/scripts/slide_<n>.txt` with matching `slide_<n>_meta.json` describing word counts and limits used. Original scripts are mirrored in `outputs/<job_id>/scripts/original/` and Hinglish rewrites in `outputs/<job_id>/scripts/hinglish/`.
 The CLI also prints a final "Viewer question" generated from the combined script.

@@ -5,7 +5,7 @@ import os
 import re
 import uuid
 from pathlib import Path
-from typing import List
+from typing import List, Tuple
 
 from openai import OpenAI
 
@@ -207,14 +207,18 @@ def generate_scripts_from_images(
     model_name: str,
     target_words: int = DEFAULT_TARGET_WORDS,
     max_words: int = DEFAULT_MAX_WORDS,
-) -> List[str]:
+) -> Tuple[List[str], Path]:
     client = _build_client()
     scripts: List[str] = []
     total_slides = len(images)
     job_identifier = uuid.uuid4().hex
     voice_style = _get_voice_style()
     scripts_dir = Path("outputs") / job_identifier / "scripts"
+    original_dir = scripts_dir / "original"
+    hinglish_dir = scripts_dir / "hinglish"
     scripts_dir.mkdir(parents=True, exist_ok=True)
+    original_dir.mkdir(parents=True, exist_ok=True)
+    hinglish_dir.mkdir(parents=True, exist_ok=True)
 
     for index, image in enumerate(images, start=1):
         logger.info("Generating script for slide %s/%s", index, total_slides)
@@ -272,6 +276,8 @@ def generate_scripts_from_images(
 
         script_path = scripts_dir / f"slide_{index}.txt"
         script_path.write_text(script, encoding="utf-8")
+        original_script_path = original_dir / f"slide_{index}.txt"
+        original_script_path.write_text(script, encoding="utf-8")
         meta_path = scripts_dir / f"slide_{index}_meta.json"
         meta_payload = {
             "word_count": _word_count(script),
@@ -282,7 +288,7 @@ def generate_scripts_from_images(
             json.dumps(meta_payload, indent=2, ensure_ascii=False), encoding="utf-8"
         )
 
-    return scripts
+    return scripts, scripts_dir
 
 
 def generate_viewer_question(full_script: str) -> str:
