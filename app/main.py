@@ -1,4 +1,5 @@
 import asyncio
+import json
 import logging
 import os
 from io import BytesIO
@@ -24,11 +25,12 @@ from app.script_generator import (
     DEFAULT_MAX_WORDS,
     DEFAULT_TARGET_WORDS,
     _build_client,
-    generate_scripts_from_images,
+    create_scripts_job_dir,
+    generate_script_for_slide,
     generate_viewer_question,
     humanize_full_script,
 )
-from app.rewrite_hinglish import rewrite_all_blocks, write_blocks
+from app.rewrite_hinglish import rewrite_all_blocks
 
 
 logging.basicConfig(level=logging.INFO)
@@ -124,93 +126,97 @@ async def _generate_and_send_scripts(
             )
         )
         target_words, max_words = _get_word_limits()
-        scripts, scripts_dir = generate_scripts_from_images(
-            images,
-            _get_model_name(),
-            target_words=target_words,
-            max_words=max_words,
-        )
+        model_name = _get_model_name()
         voice_style = _get_voice_style()
         output_mode = _get_output_mode()
-        full_script = "\n".join(scripts)
-        if voice_style != "youtube":
-            viewer_question = generate_viewer_question(full_script)
-            if viewer_question and scripts:
-                question_line = f"Comment below—{viewer_question}"
-                scripts[-1] = f"{scripts[-1]}\n{question_line}"
-                full_script = "\n".join(scripts)
-
-        hinglish_scripts: list[str] | None = None
-        if os.environ.get("ENABLE_HINGLISH_REWRITE", "true").strip().lower() in {
+        total_slides = len(images)
+        client = _build_client()
+        scripts_dir, original_dir, hinglish_dir = create_scripts_job_dir()
+        scripts: list[str] = []
+        hinglish_enabled = os.environ.get("ENABLE_HINGLISH_REWRITE", "true").strip().lower() in {
             "1",
             "true",
             "yes",
             "y",
-        }:
-            async def on_start(total: int) -> None:
-                logger.info("Starting Hinglish rewrite for %s slides.", total)
+        }
+        hinglish_scripts: list[str] = []
+
+        for index, image in enumerate(images, start=1):
+            logger.info("Generating script for slide %s/%s", index, total_slides)
+            if output_mode in ["slides", "both"]:
                 await _send_message(
                     context,
                     chat_id,
-                    "===== HINGLISH REWRITE STARTED (one-by-one) =====",
+                    f"===== SLIDE {index}/{total_slides}: ORIGINAL =====",
                 )
-
-            async def on_slide_start(index: int, total: int) -> None:
-                await _send_message(
-                    context,
-                    chat_id,
-                    f"HINGLISH: rewriting slide {index}/{total}...",
-                )
-
-            async def on_slide_fallback(index: int, total: int, reason: str) -> None:
-                logger.warning(
-                    "Hinglish rewrite fallback for slide %s/%s due to %s.",
-                    index,
-                    total,
-                    reason,
-                )
-                await _send_message(
-                    context,
-                    chat_id,
-                    f"WARNING: Hinglish rewrite failed for slide {index}. Sending original.",
-                )
-
-            async def on_done(total: int) -> None:
-                logger.info("Completed Hinglish rewrite for %s slides.", total)
-                await _send_message(
-                    context,
-                    chat_id,
-                    "===== HINGLISH REWRITE COMPLETED =====",
-                )
-
-            hinglish_scripts = await rewrite_all_blocks(
-                scripts,
-                on_start=on_start,
-                on_slide_start=on_slide_start,
-                on_slide_fallback=on_slide_fallback,
-                on_done=on_done,
+            script = await asyncio.to_thread(
+                generate_script_for_slide,
+                image,
+                client=client,
+                model_name=model_name,
+                slide_index=index,
+                total_slides=total_slides,
+                target_words=target_words,
+                max_words=max_words,
+                scripts_dir=scripts_dir,
             )
-            write_blocks(hinglish_scripts, scripts_dir / "hinglish")
+
+            if index == total_slides and voice_style != "youtube":
+                full_script_for_question = "\n".join(scripts + [script])
+                viewer_question = await asyncio.to_thread(
+                    generate_viewer_question, full_script_for_question
+                )
+                if viewer_question:
+                    question_line = f"Comment below—{viewer_question}"
+                    script = f"{script}\n{question_line}"
+                    if scripts_dir:
+                        script_path = scripts_dir / f"slide_{index}.txt"
+                        script_path.write_text(script, encoding="utf-8")
+                        original_script_path = original_dir / f"slide_{index}.txt"
+                        original_script_path.write_text(script, encoding="utf-8")
+                        meta_path = scripts_dir / f"slide_{index}_meta.json"
+                        meta_payload = {}
+                        if meta_path.exists():
+                            meta_payload = json.loads(meta_path.read_text(encoding="utf-8"))
+                        meta_payload["word_count"] = len(script.split())
+                        meta_path.write_text(
+                            json.dumps(meta_payload, indent=2, ensure_ascii=False),
+                            encoding="utf-8",
+                        )
+
+            scripts.append(script)
+
+            if output_mode in ["slides", "both"]:
+                await _send_long(context, chat_id, script)
+
+            if hinglish_enabled:
+                if output_mode in ["slides", "both"]:
+                    await _send_message(
+                        context,
+                        chat_id,
+                        f"===== SLIDE {index}/{total_slides}: HINGLISH =====",
+                    )
+                hinglish_block = await rewrite_all_blocks(
+                    [script],
+                    client=client,
+                )
+                hinglish_script = hinglish_block[0] if hinglish_block else script
+                hinglish_scripts.append(hinglish_script)
+                hinglish_path = hinglish_dir / f"slide_{index}.txt"
+                hinglish_path.write_text(hinglish_script, encoding="utf-8")
+                if output_mode in ["slides", "both"]:
+                    await _send_long(context, chat_id, hinglish_script)
 
         if output_mode in ["full", "both"]:
-            full_payload = full_script
+            full_payload = "\n".join(scripts)
             if _get_humanize_full_script() and voice_style == "youtube":
-                full_payload = humanize_full_script(
-                    full_payload, client=_build_client(), model_name=_get_model_name()
+                full_payload = await asyncio.to_thread(
+                    humanize_full_script, full_payload, client=client, model_name=model_name
                 )
             await _send_long(context, chat_id, full_payload)
 
-        if output_mode in ["slides", "both"]:
-            for index, script in enumerate(scripts, start=1):
-                logger.info("Sending generated script for slide %s", index)
-                await _send_message(context, chat_id, script)
-        if hinglish_scripts:
-            if output_mode in ["full", "both"]:
-                await _send_long(context, chat_id, "\n".join(hinglish_scripts))
-            if output_mode in ["slides", "both"]:
-                for index, script in enumerate(hinglish_scripts, start=1):
-                    logger.info("Sending Hinglish script for slide %s", index)
-                    await _send_message(context, chat_id, script)
+        if hinglish_enabled and hinglish_scripts and output_mode in ["full", "both"]:
+            await _send_long(context, chat_id, "\n".join(hinglish_scripts))
         logger.info("Completed script generation for chat_id=%s", chat_id)
     except Exception as exc:  # pragma: no cover - logged to user
         logger.exception("Failed to generate scripts for chat_id=%s: %s", chat_id, exc)

@@ -5,7 +5,7 @@ import os
 import re
 import uuid
 from pathlib import Path
-from typing import List, Tuple
+from typing import List, Optional, Tuple
 
 from openai import OpenAI
 
@@ -202,6 +202,106 @@ def humanize_full_script(full_script: str, client: OpenAI, model_name: str) -> s
     return output
 
 
+def create_scripts_job_dir(
+    job_identifier: Optional[str] = None,
+) -> Tuple[Path, Path, Path]:
+    job_identifier = job_identifier or uuid.uuid4().hex
+    scripts_dir = Path("outputs") / job_identifier / "scripts"
+    original_dir = scripts_dir / "original"
+    hinglish_dir = scripts_dir / "hinglish"
+    scripts_dir.mkdir(parents=True, exist_ok=True)
+    original_dir.mkdir(parents=True, exist_ok=True)
+    hinglish_dir.mkdir(parents=True, exist_ok=True)
+    return scripts_dir, original_dir, hinglish_dir
+
+
+def generate_script_for_slide(
+    image: bytes,
+    *,
+    client: Optional[OpenAI] = None,
+    model_name: str,
+    slide_index: int,
+    total_slides: int,
+    target_words: int,
+    max_words: int,
+    scripts_dir: Optional[Path] = None,
+) -> str:
+    active_client = client or _build_client()
+    voice_style = _get_voice_style()
+
+    if slide_index == 1 and voice_style != "youtube":
+        slide_target_words = max(
+            SLIDE_ONE_MIN_WORDS, min(target_words, SLIDE_ONE_MAX_WORDS)
+        )
+        slide_max_words = min(max_words, SLIDE_ONE_MAX_WORDS)
+        welcome_line = "नमस्ते! Welcome to Index Theory’s Post Market Report."
+        fixed_words = _word_count(welcome_line)
+        body_target = max(10, slide_target_words - fixed_words)
+        body_max = max(12, slide_max_words - fixed_words)
+        body_instruction = (
+            "Provide 2-3 short sentences summarizing only this slide. "
+            "Do not add outlines, transitions, or CTA."
+        )
+        body = _generate_slide_body(
+            image, active_client, model_name, body_instruction, body_target, body_max
+        )
+        slide_lines = [welcome_line, body]
+        script = "\n".join(line for line in slide_lines if line)
+        script = _enforce_word_limit(script, SLIDE_ONE_MAX_WORDS)
+    else:
+        slide_target_words = target_words
+        slide_max_words = max_words
+        if slide_index == total_slides:
+            body_instruction = (
+                "Provide 2-4 short sentences strictly from this slide. "
+                "Do NOT include any greeting, opener, transition, CTA, or viewer question."
+            )
+        else:
+            body_instruction = (
+                "Write 2-4 short sentences from only the slide content. "
+                "Do NOT include any greeting, opener, transition, or CTA."
+            )
+        body = _generate_slide_body(
+            image,
+            active_client,
+            model_name,
+            body_instruction,
+            slide_target_words,
+            slide_max_words,
+        )
+        script = body.strip()
+        if slide_index == total_slides and voice_style != "youtube":
+            cta_lines = [
+                "Like, Subscribe, and share your view in the comments.",
+                "Hit the bell for updates.",
+            ]
+            script = f"{script}\n" + "\n".join(cta_lines)
+
+    script = normalize_hindi_to_devanagari(script, active_client, model_name)
+
+    if scripts_dir is not None:
+        scripts_dir = Path(scripts_dir)
+        original_dir = scripts_dir / "original"
+        scripts_dir.mkdir(parents=True, exist_ok=True)
+        original_dir.mkdir(parents=True, exist_ok=True)
+
+        script_path = scripts_dir / f"slide_{slide_index}.txt"
+        script_path.write_text(script, encoding="utf-8")
+        original_script_path = original_dir / f"slide_{slide_index}.txt"
+        original_script_path.write_text(script, encoding="utf-8")
+        meta_path = scripts_dir / f"slide_{slide_index}_meta.json"
+        meta_payload = {
+            "word_count": _word_count(script),
+            "target_words": slide_target_words,
+            "max_words": slide_max_words,
+        }
+        meta_path.write_text(
+            json.dumps(meta_payload, indent=2, ensure_ascii=False), encoding="utf-8"
+        )
+
+    return script
+
+
 def generate_scripts_from_images(
     images: List[bytes],
     model_name: str,
@@ -211,82 +311,21 @@ def generate_scripts_from_images(
     client = _build_client()
     scripts: List[str] = []
     total_slides = len(images)
-    job_identifier = uuid.uuid4().hex
-    voice_style = _get_voice_style()
-    scripts_dir = Path("outputs") / job_identifier / "scripts"
-    original_dir = scripts_dir / "original"
-    hinglish_dir = scripts_dir / "hinglish"
-    scripts_dir.mkdir(parents=True, exist_ok=True)
-    original_dir.mkdir(parents=True, exist_ok=True)
-    hinglish_dir.mkdir(parents=True, exist_ok=True)
+    scripts_dir, _, _ = create_scripts_job_dir()
 
     for index, image in enumerate(images, start=1):
         logger.info("Generating script for slide %s/%s", index, total_slides)
-
-        if index == 1 and voice_style != "youtube":
-            slide_target_words = max(
-                SLIDE_ONE_MIN_WORDS, min(target_words, SLIDE_ONE_MAX_WORDS)
-            )
-            slide_max_words = min(max_words, SLIDE_ONE_MAX_WORDS)
-            welcome_line = "नमस्ते! Welcome to Index Theory’s Post Market Report."
-            fixed_words = _word_count(welcome_line)
-            body_target = max(10, slide_target_words - fixed_words)
-            body_max = max(12, slide_max_words - fixed_words)
-            body_instruction = (
-                "Provide 2-3 short sentences summarizing only this slide. "
-                "Do not add outlines, transitions, or CTA."
-            )
-            body = _generate_slide_body(
-                image, client, model_name, body_instruction, body_target, body_max
-            )
-            slide_lines = [welcome_line, body]
-            script = "\n".join(line for line in slide_lines if line)
-            script = _enforce_word_limit(script, SLIDE_ONE_MAX_WORDS)
-        else:
-            slide_target_words = target_words
-            slide_max_words = max_words
-            if index == total_slides and voice_style != "youtube":
-                body_instruction = (
-                    "Provide 2-4 short sentences strictly from this slide. "
-                    "Do NOT include any greeting, opener, transition, CTA, or viewer question."
-                )
-            elif index == total_slides and voice_style == "youtube":
-                body_instruction = (
-                    "Provide 2-4 short sentences strictly from this slide. "
-                    "Do NOT include any greeting, opener, transition, CTA, or viewer question."
-                )
-            else:
-                body_instruction = (
-                    "Write 2-4 short sentences from only the slide content. "
-                    "Do NOT include any greeting, opener, transition, or CTA."
-                )
-            body = _generate_slide_body(
-                image, client, model_name, body_instruction, slide_target_words, slide_max_words
-            )
-            script = body.strip()
-            if index == total_slides and voice_style != "youtube":
-                cta_lines = [
-                    "Like, Subscribe, and share your view in the comments.",
-                    "Hit the bell for updates.",
-                ]
-                script = f"{script}\n" + "\n".join(cta_lines)
-
-        script = normalize_hindi_to_devanagari(script, client, model_name)
-        scripts.append(script)
-
-        script_path = scripts_dir / f"slide_{index}.txt"
-        script_path.write_text(script, encoding="utf-8")
-        original_script_path = original_dir / f"slide_{index}.txt"
-        original_script_path.write_text(script, encoding="utf-8")
-        meta_path = scripts_dir / f"slide_{index}_meta.json"
-        meta_payload = {
-            "word_count": _word_count(script),
-            "target_words": slide_target_words,
-            "max_words": slide_max_words,
-        }
-        meta_path.write_text(
-            json.dumps(meta_payload, indent=2, ensure_ascii=False), encoding="utf-8"
+        script = generate_script_for_slide(
+            image,
+            client=client,
+            model_name=model_name,
+            slide_index=index,
+            total_slides=total_slides,
+            target_words=target_words,
+            max_words=max_words,
+            scripts_dir=scripts_dir,
         )
+        scripts.append(script)
 
     return scripts, scripts_dir
 

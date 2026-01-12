@@ -232,7 +232,8 @@ async def rewrite_all_blocks(
 
         for attempt in range(MAX_REWRITE_ATTEMPTS):
             try:
-                output = rewrite_block_to_hinglish(
+                output = await asyncio.to_thread(
+                    rewrite_block_to_hinglish,
                     block,
                     client=active_client,
                     model_name=active_model,
