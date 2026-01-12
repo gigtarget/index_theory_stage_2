@@ -34,6 +34,7 @@ from app.script_generator import (
     humanize_full_script,
 )
 from app.rewrite_hinglish import rewrite_all_blocks
+from app.text_postprocess import lowercase_long_allcaps_words
 
 
 logging.basicConfig(level=logging.INFO)
@@ -193,6 +194,22 @@ async def _generate_and_send_scripts(
                             encoding="utf-8",
                         )
 
+            script = lowercase_long_allcaps_words(script)
+            if scripts_dir:
+                script_path = scripts_dir / f"slide_{index}.txt"
+                script_path.write_text(script, encoding="utf-8")
+                original_script_path = original_dir / f"slide_{index}.txt"
+                original_script_path.write_text(script, encoding="utf-8")
+                meta_path = scripts_dir / f"slide_{index}_meta.json"
+                meta_payload = {}
+                if meta_path.exists():
+                    meta_payload = json.loads(meta_path.read_text(encoding="utf-8"))
+                meta_payload["word_count"] = len(script.split())
+                meta_path.write_text(
+                    json.dumps(meta_payload, indent=2, ensure_ascii=False),
+                    encoding="utf-8",
+                )
+
             scripts.append(script)
 
             if output_mode in ["slides", "both"]:
@@ -218,6 +235,7 @@ async def _generate_and_send_scripts(
                     slide_indices=[index],
                 )
                 hinglish_script = hinglish_block[0] if hinglish_block else script
+                hinglish_script = lowercase_long_allcaps_words(hinglish_script)
                 if fallback_state["used"]:
                     if fallback_state["reason"] == "digits":
                         display_script = f"[HINGLISH FALLBACK USED: digits]\n{hinglish_script}"
