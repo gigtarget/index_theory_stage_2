@@ -69,7 +69,11 @@ def _max_tokens_for_text(text: str) -> int:
 
 
 def _digit_sequences(text: str) -> List[str]:
-    return re.findall(r"\d[\d,.]*", text)
+    return re.findall(r"-?\d[\d,]*\.?\d*", text)
+
+
+def _canonical_digits(text: str) -> set[str]:
+    return {token.replace(",", "") for token in _digit_sequences(text)}
 
 
 def _normalize_output(text: str) -> str:
@@ -107,8 +111,8 @@ def rewrite_block_to_hinglish(
     output = _normalize_output(output)
     if not output:
         raise ValueError("Empty Hinglish rewrite output.")
-    input_digits = set(_digit_sequences(text))
-    output_digits = set(_digit_sequences(output))
+    input_digits = _canonical_digits(text)
+    output_digits = _canonical_digits(output)
     if not input_digits.issubset(output_digits):
         raise ValueError("Digit guard failed in Hinglish rewrite.")
     return output
@@ -117,11 +121,12 @@ def rewrite_block_to_hinglish(
 def rewrite_all_blocks(blocks: Iterable[str]) -> list[str]:
     if not _get_env_flag("ENABLE_HINGLISH_REWRITE", True):
         return list(blocks)
+    blocks_list = list(blocks)
     client = _build_client()
     model_name = _get_model_name()
     temperature = _get_temperature()
     rewritten: list[str] = []
-    for index, block in enumerate(blocks, start=1):
+    for index, block in enumerate(blocks_list, start=1):
         last_error: Optional[Exception] = None
         for attempt in range(3):
             try:
@@ -149,6 +154,16 @@ def rewrite_all_blocks(blocks: Iterable[str]) -> list[str]:
                 index,
             )
             rewritten.append(block)
+    if rewritten:
+        identical_count = sum(
+            1
+            for original, rewritten_block in zip(blocks_list, rewritten, strict=False)
+            if original.strip() == rewritten_block.strip()
+        )
+        if identical_count == len(rewritten):
+            logger.warning(
+                "All Hinglish rewrites matched originals; likely digit guard fallback or model issue."
+            )
     return rewritten
 
 
