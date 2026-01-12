@@ -72,6 +72,19 @@ _DIGIT_WORDS = {
 }
 
 
+def _counter_to_alpha(n: int) -> str:
+    if n < 0:
+        raise ValueError("Counter must be non-negative")
+    letters = []
+    while True:
+        n, remainder = divmod(n, 26)
+        letters.append(chr(ord("A") + remainder))
+        if n == 0:
+            break
+        n -= 1
+    return "".join(reversed(letters))
+
+
 def _protect_tokens(text: str) -> Tuple[str, Dict[str, str]]:
     replacements: Dict[str, str] = {}
     counter = 0
@@ -79,7 +92,7 @@ def _protect_tokens(text: str) -> Tuple[str, Dict[str, str]]:
     for pattern in PROTECTED_PATTERNS:
         def _repl(match: re.Match[str]) -> str:
             nonlocal counter
-            placeholder = f"__PROTECTED_{counter}__"
+            placeholder = f"__PROTECTED_{_counter_to_alpha(counter)}__"
             replacements[placeholder] = match.group(0)
             counter += 1
             return placeholder
