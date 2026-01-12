@@ -28,6 +28,7 @@ from app.script_generator import (
     generate_viewer_question,
     humanize_full_script,
 )
+from app.rewrite_hinglish import rewrite_all_blocks, write_blocks
 
 
 logging.basicConfig(level=logging.INFO)
@@ -122,7 +123,7 @@ async def _generate_and_send_scripts(
             )
         )
         target_words, max_words = _get_word_limits()
-        scripts = generate_scripts_from_images(
+        scripts, scripts_dir = generate_scripts_from_images(
             images,
             _get_model_name(),
             target_words=target_words,
@@ -138,6 +139,16 @@ async def _generate_and_send_scripts(
                 scripts[-1] = f"{scripts[-1]}\n{question_line}"
                 full_script = "\n".join(scripts)
 
+        hinglish_scripts: list[str] | None = None
+        if os.environ.get("ENABLE_HINGLISH_REWRITE", "true").strip().lower() in {
+            "1",
+            "true",
+            "yes",
+            "y",
+        }:
+            hinglish_scripts = rewrite_all_blocks(scripts)
+            write_blocks(hinglish_scripts, scripts_dir / "hinglish")
+
         if output_mode in ["full", "both"]:
             full_payload = full_script
             if _get_humanize_full_script() and voice_style == "youtube":
@@ -150,6 +161,13 @@ async def _generate_and_send_scripts(
             for index, script in enumerate(scripts, start=1):
                 logger.info("Sending generated script for slide %s", index)
                 await _send_message(context, chat_id, script)
+        if hinglish_scripts:
+            if output_mode in ["full", "both"]:
+                await _send_long(context, chat_id, "\n".join(hinglish_scripts))
+            if output_mode in ["slides", "both"]:
+                for index, script in enumerate(hinglish_scripts, start=1):
+                    logger.info("Sending Hinglish script for slide %s", index)
+                    await _send_message(context, chat_id, script)
         logger.info("Completed script generation for chat_id=%s", chat_id)
     except Exception as exc:  # pragma: no cover - logged to user
         logger.exception("Failed to generate scripts for chat_id=%s: %s", chat_id, exc)

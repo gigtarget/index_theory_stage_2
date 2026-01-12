@@ -11,6 +11,7 @@ from app.script_generator import (
     generate_scripts_from_images,
     generate_viewer_question,
 )
+from app.rewrite_hinglish import rewrite_all_blocks, write_blocks
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -77,7 +78,7 @@ def main(args: Optional[argparse.Namespace] = None) -> None:
         from app.pdf_processor import split_pdf_to_images
 
         images = split_pdf_to_images(parsed.pdf)
-        scripts = generate_scripts_from_images(
+        scripts, scripts_dir = generate_scripts_from_images(
             images,
             parsed.model,
             target_words=parsed.target_words,
@@ -89,8 +90,20 @@ def main(args: Optional[argparse.Namespace] = None) -> None:
         viewer_question = generate_viewer_question(full_script)
         if viewer_question and scripts:
             scripts[-1] = f"{scripts[-1]}\nComment below—{viewer_question}"
+    hinglish_scripts: list[str] | None = None
+    if (
+        not parsed.dry_run
+        and os.environ.get("ENABLE_HINGLISH_REWRITE", "true").strip().lower()
+        in {"1", "true", "yes", "y"}
+    ):
+        hinglish_scripts = rewrite_all_blocks(scripts)
+        write_blocks(hinglish_scripts, scripts_dir / "hinglish")
+
     for idx, script in enumerate(scripts, start=1):
         print(f"\n--- Slide {idx} ---\n{script}\n")
+    if hinglish_scripts:
+        for idx, script in enumerate(hinglish_scripts, start=1):
+            print(f"\n--- Hinglish Slide {idx} ---\n{script}\n")
 
 
 if __name__ == "__main__":
