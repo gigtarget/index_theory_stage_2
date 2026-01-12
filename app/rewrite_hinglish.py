@@ -13,6 +13,7 @@ logger = logging.getLogger(__name__)
 
 SYSTEM_PROMPT = """
 You are a financial market commentator. Rewrite text into natural Hinglish narration for voiceover. Follow rules strictly.
+Return plain text only. Do not call tools. Do not output JSON.
 """.strip()
 
 USER_PROMPT_TEMPLATE = """
@@ -97,6 +98,20 @@ def _normalize_output(text: str) -> str:
     return "\n".join(line for line in lines if line).strip()
 
 
+def _response_format_unsupported(exc: Exception) -> bool:
+    message = str(exc).lower()
+    return (
+        "response_format" in message
+        and (
+            "unsupported" in message
+            or "unknown" in message
+            or "not allowed" in message
+            or "unrecognized" in message
+            or "invalid" in message
+        )
+    )
+
+
 def _build_prompt(block: str, extra_instruction: str | None = None) -> str:
     prompt = USER_PROMPT_TEMPLATE
     if extra_instruction:
@@ -129,20 +144,48 @@ def rewrite_block_to_hinglish(
     prompt = _build_prompt(text, extra_instruction=extra_instruction)
 
     # FIX: newer OpenAI models reject `max_tokens` and require `max_completion_tokens`
-    result = active_client.chat.completions.create(
-        model=active_model,
-        messages=[
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": prompt},
-        ],
-        temperature=active_temperature,
-        top_p=top_p,
-        max_completion_tokens=_max_tokens_for_text(text),
-    )
+    try:
+        result = active_client.chat.completions.create(
+            model=active_model,
+            messages=[
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "user", "content": prompt},
+            ],
+            temperature=active_temperature,
+            top_p=top_p,
+            max_completion_tokens=_max_tokens_for_text(text),
+            response_format={"type": "text"},
+        )
+    except Exception as exc:
+        if not _response_format_unsupported(exc):
+            raise
+        logger.info(
+            "response_format not supported for model %s; retrying without it.",
+            active_model,
+        )
+        result = active_client.chat.completions.create(
+            model=active_model,
+            messages=[
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "user", "content": prompt},
+            ],
+            temperature=active_temperature,
+            top_p=top_p,
+            max_completion_tokens=_max_tokens_for_text(text),
+        )
 
-    output = (result.choices[0].message.content or "").strip()
+    msg = result.choices[0].message
+    output = (getattr(msg, "content", None) or "").strip()
     output = _normalize_output(output)
     if not output:
+        finish_reason = getattr(result.choices[0], "finish_reason", None)
+        logger.warning(
+            "Empty Hinglish rewrite output. model=%s finish_reason=%s message=%r choice=%r",
+            active_model,
+            finish_reason,
+            msg,
+            result.choices[0],
+        )
         raise ValueError("Empty Hinglish rewrite output.")
     if _normalize_output(text) == output:
         raise UnchangedOutputError("Hinglish rewrite output matched input.")
