@@ -1,4 +1,5 @@
 import argparse
+import asyncio
 import logging
 import os
 import re
@@ -96,7 +97,7 @@ def main(args: Optional[argparse.Namespace] = None) -> None:
         and os.environ.get("ENABLE_HINGLISH_REWRITE", "true").strip().lower()
         in {"1", "true", "yes", "y"}
     ):
-        hinglish_scripts = rewrite_all_blocks(scripts)
+        hinglish_scripts = asyncio.run(rewrite_all_blocks(scripts))
         write_blocks(hinglish_scripts, scripts_dir / "hinglish")
 
     for idx, script in enumerate(scripts, start=1):
