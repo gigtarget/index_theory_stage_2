@@ -127,6 +127,8 @@ def rewrite_block_to_hinglish(
     active_model = model_name or _get_model_name()
     active_temperature = DEFAULT_TEMPERATURE if temperature is None else temperature
     prompt = _build_prompt(text, extra_instruction=extra_instruction)
+
+    # FIX: newer OpenAI models reject `max_tokens` and require `max_completion_tokens`
     result = active_client.chat.completions.create(
         model=active_model,
         messages=[
@@ -135,8 +137,9 @@ def rewrite_block_to_hinglish(
         ],
         temperature=active_temperature,
         top_p=top_p,
-        max_tokens=_max_tokens_for_text(text),
+        max_completion_tokens=_max_tokens_for_text(text),
     )
+
     output = (result.choices[0].message.content or "").strip()
     output = _normalize_output(output)
     if not output:
@@ -163,21 +166,27 @@ async def rewrite_all_blocks(
 ) -> list[str]:
     if not _get_env_flag("ENABLE_HINGLISH_REWRITE", True):
         return list(blocks)
+
     blocks_list = list(blocks)
     total = len(blocks_list)
     active_client = client or _build_client()
     active_model = model_name or _get_model_name()
     active_temperature = _get_temperature() if temperature is None else temperature
+
     rewritten: list[str] = []
     fallback_count = 0
+
     await _maybe_await(on_start, total)
     logger.info("Starting Hinglish rewrite for %s slides.", total)
+
     for index, block in enumerate(blocks_list, start=1):
         await _maybe_await(on_slide_start, index, total)
+
         last_error: Optional[Exception] = None
         last_reason = "unknown"
         retry_temperature = active_temperature
         extra_instruction: str | None = None
+
         for attempt in range(MAX_REWRITE_ATTEMPTS):
             try:
                 output = rewrite_block_to_hinglish(
@@ -191,6 +200,7 @@ async def rewrite_all_blocks(
                 last_error = None
                 logger.info("Hinglish rewrite succeeded for slide %s.", index)
                 break
+
             except DigitGuardError as exc:
                 last_error = exc
                 last_reason = "digit guard"
@@ -203,6 +213,7 @@ async def rewrite_all_blocks(
                     MAX_REWRITE_ATTEMPTS,
                     exc,
                 )
+
             except UnchangedOutputError as exc:
                 last_error = exc
                 last_reason = "unchanged output"
@@ -213,6 +224,7 @@ async def rewrite_all_blocks(
                     MAX_REWRITE_ATTEMPTS,
                     exc,
                 )
+
             except Exception as exc:
                 last_error = exc
                 last_reason = "openai error"
@@ -223,6 +235,7 @@ async def rewrite_all_blocks(
                     MAX_REWRITE_ATTEMPTS,
                     exc,
                 )
+
         if last_error:
             fallback_count += 1
             logger.warning(
@@ -232,6 +245,7 @@ async def rewrite_all_blocks(
             )
             await _maybe_await(on_slide_fallback, index, total, last_reason)
             rewritten.append(block)
+
     logger.info(
         "Completed Hinglish rewrite. slides=%s fallbacks=%s",
         total,
