@@ -146,7 +146,49 @@ async def _generate_and_send_scripts(
             "yes",
             "y",
         }:
-            hinglish_scripts = rewrite_all_blocks(scripts)
+            async def on_start(total: int) -> None:
+                logger.info("Starting Hinglish rewrite for %s slides.", total)
+                await _send_message(
+                    context,
+                    chat_id,
+                    "===== HINGLISH REWRITE STARTED (one-by-one) =====",
+                )
+
+            async def on_slide_start(index: int, total: int) -> None:
+                await _send_message(
+                    context,
+                    chat_id,
+                    f"HINGLISH: rewriting slide {index}/{total}...",
+                )
+
+            async def on_slide_fallback(index: int, total: int, reason: str) -> None:
+                logger.warning(
+                    "Hinglish rewrite fallback for slide %s/%s due to %s.",
+                    index,
+                    total,
+                    reason,
+                )
+                await _send_message(
+                    context,
+                    chat_id,
+                    f"WARNING: Hinglish rewrite failed for slide {index}. Sending original.",
+                )
+
+            async def on_done(total: int) -> None:
+                logger.info("Completed Hinglish rewrite for %s slides.", total)
+                await _send_message(
+                    context,
+                    chat_id,
+                    "===== HINGLISH REWRITE COMPLETED =====",
+                )
+
+            hinglish_scripts = await rewrite_all_blocks(
+                scripts,
+                on_start=on_start,
+                on_slide_start=on_slide_start,
+                on_slide_fallback=on_slide_fallback,
+                on_done=on_done,
+            )
             write_blocks(hinglish_scripts, scripts_dir / "hinglish")
 
         if output_mode in ["full", "both"]:
