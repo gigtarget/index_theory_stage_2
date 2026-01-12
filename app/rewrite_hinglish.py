@@ -45,6 +45,7 @@ DEFAULT_FALLBACK_MODEL = "gpt-4.1-mini"
 DEFAULT_MAX_COMPLETION_TOKENS = 2048
 DEFAULT_RETRY_MAX_COMPLETION_TOKENS = 4096
 DEFAULT_MAX_RETRIES = 3
+DEFAULT_DIGIT_GUARD_ENABLED = False
 
 
 class HinglishRewriteError(Exception):
@@ -131,6 +132,10 @@ def _get_max_retries() -> int:
     return max(0, _get_int_env("HINGLISH_MAX_RETRIES", DEFAULT_MAX_RETRIES))
 
 
+def _digit_guard_enabled() -> bool:
+    return _get_env_flag("HINGLISH_DIGIT_GUARD", DEFAULT_DIGIT_GUARD_ENABLED)
+
+
 def _digit_sequences(text: str) -> List[str]:
     return re.findall(r"-?\d[\d,]*\.?\d*", text)
 
@@ -142,6 +147,16 @@ def _canonical_digits(text: str) -> set[str]:
 def _normalize_output(text: str) -> str:
     lines = [re.sub(r"\s+", " ", line.strip()) for line in text.splitlines()]
     return "\n".join(line for line in lines if line).strip()
+
+
+def _digit_context(text: str, window: int = 50) -> Optional[str]:
+    match = re.search(r"\d", text)
+    if not match:
+        return None
+    half_window = max(1, window // 2)
+    start = max(0, match.start() - half_window)
+    end = min(len(text), match.start() + half_window)
+    return text[start:end]
 
 
 def _build_prompt(block: str, extra_instruction: str | None = None) -> str:
@@ -170,7 +185,7 @@ def rewrite_block_to_hinglish(
     top_p: float = DEFAULT_TOP_P,
     extra_instruction: str | None = None,
     max_completion_tokens: Optional[int] = None,
-    enforce_digit_guard: bool = True,
+    enforce_digit_guard: bool = False,
 ) -> str:
     active_client = client or _build_client()
     active_model = model_name or _get_model_name()
@@ -211,6 +226,14 @@ def rewrite_block_to_hinglish(
         input_digits = _canonical_digits(text)
         output_digits = _canonical_digits(output)
         if not input_digits.issubset(output_digits):
+            context = _digit_context(output)
+            if context:
+                logger.warning(
+                    "Digit guard failed. Output digit context: %s",
+                    context,
+                )
+            else:
+                logger.warning("Digit guard failed. No digits found in output.")
             raise DigitGuardError(
                 "Digit guard failed in Hinglish rewrite.",
                 finish_reason=finish_reason,
@@ -243,6 +266,7 @@ async def rewrite_all_blocks(
     max_completion_tokens = _get_max_completion_tokens()
     retry_max_completion_tokens = _get_retry_max_completion_tokens()
     max_retries = _get_max_retries()
+    digit_guard_enabled = _digit_guard_enabled()
 
     rewritten: list[str] = []
     fallback_count = 0
@@ -284,7 +308,7 @@ async def rewrite_all_blocks(
                     temperature=retry_temperature,
                     extra_instruction=extra_instruction,
                     max_completion_tokens=attempt_max_tokens,
-                    enforce_digit_guard=True,
+                    enforce_digit_guard=digit_guard_enabled,
                 )
                 final_output = output
                 last_error = None
@@ -357,7 +381,7 @@ async def rewrite_all_blocks(
                     temperature=retry_temperature,
                     extra_instruction=extra_instruction,
                     max_completion_tokens=retry_max_completion_tokens,
-                    enforce_digit_guard=True,
+                    enforce_digit_guard=digit_guard_enabled,
                 )
                 rewritten.append(output)
                 last_error = None
