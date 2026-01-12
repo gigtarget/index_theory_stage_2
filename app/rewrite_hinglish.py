@@ -7,7 +7,6 @@ from typing import Awaitable, Callable, Iterable, List, Optional
 
 from openai import OpenAI
 
-from app.num_to_words import convert_numerals_to_words, has_disallowed_digits
 from app.script_generator import _build_client
 
 logger = logging.getLogger(__name__)
@@ -26,6 +25,8 @@ Rules:
 - Keep cause–effect reasoning (why it matters, what it signals).
 - No bold, no headings, no bullet points, no numbering.
 - Preserve numeric meaning and levels; do not invent or change values.
+- Keep numbers exactly as provided (do not convert to words).
+- Do not change values; do not invent numbers.
 - Do not copy sentences verbatim; rephrase everything.
 - Do not add new data or assumptions.
 - Avoid repetitive phrasing and robotic structure.
@@ -71,10 +72,6 @@ class UnchangedOutputError(HinglishRewriteError):
 
 class RetryableOutputError(HinglishRewriteError):
     """Retryable output failure, such as empty or truncated output."""
-
-
-class DigitPostProcessError(HinglishRewriteError):
-    """Digits remained after numeral-to-words post-processing."""
 
 
 def _get_env_flag(name: str, default: bool = True) -> bool:
@@ -222,18 +219,6 @@ def rewrite_block_to_hinglish(
     return output
 
 
-def _postprocess_hinglish_output(text: str) -> str:
-    if not _get_env_flag("NUM_TO_WORDS_ENABLED", True):
-        return text
-    return convert_numerals_to_words(text)
-
-
-def _has_disallowed_digits(text: str) -> bool:
-    if not _get_env_flag("NUM_TO_WORDS_ENABLED", True):
-        return False
-    return has_disallowed_digits(text)
-
-
 async def rewrite_all_blocks(
     blocks: Iterable[str],
     *,
@@ -258,7 +243,6 @@ async def rewrite_all_blocks(
     max_completion_tokens = _get_max_completion_tokens()
     retry_max_completion_tokens = _get_retry_max_completion_tokens()
     max_retries = _get_max_retries()
-    num_to_words_enabled = _get_env_flag("NUM_TO_WORDS_ENABLED", True)
 
     rewritten: list[str] = []
     fallback_count = 0
@@ -300,67 +284,9 @@ async def rewrite_all_blocks(
                     temperature=retry_temperature,
                     extra_instruction=extra_instruction,
                     max_completion_tokens=attempt_max_tokens,
-                    enforce_digit_guard=not num_to_words_enabled,
+                    enforce_digit_guard=True,
                 )
-                post_processed = _postprocess_hinglish_output(output)
-                if num_to_words_enabled and _has_disallowed_digits(post_processed):
-                    logger.warning(
-                        "Digits remain after post-processing for slide %s; retrying once.",
-                        slide_index,
-                    )
-                    try:
-                        retry_output = await asyncio.to_thread(
-                            rewrite_block_to_hinglish,
-                            block,
-                            client=active_client,
-                            model_name=active_model,
-                            temperature=retry_temperature,
-                            extra_instruction=(
-                                "Do not use numerals (0-9). Spell all numbers in words. "
-                                "Keep tickers/index labels unchanged."
-                            ),
-                            max_completion_tokens=retry_max_completion_tokens,
-                            enforce_digit_guard=False,
-                        )
-                        retry_processed = _postprocess_hinglish_output(retry_output)
-                    except Exception as exc:
-                        last_error = exc
-                        last_reason = "digits"
-                        last_finish_reason = None
-                        last_model = active_model
-                        skip_model_fallback = True
-                        logger.warning(
-                            "Hinglish digit post-processing retry failed for slide %s: %s",
-                            slide_index,
-                            exc,
-                        )
-                        break
-
-                    if _has_disallowed_digits(retry_processed):
-                        last_error = DigitPostProcessError(
-                            "Digits remain after post-processing retry.",
-                            finish_reason=None,
-                            model=active_model,
-                        )
-                        last_reason = "digits"
-                        last_finish_reason = None
-                        last_model = active_model
-                        skip_model_fallback = True
-                        logger.warning(
-                            "Hinglish digit post-processing failed for slide %s after retry.",
-                            slide_index,
-                        )
-                        break
-
-                    final_output = retry_processed
-                    last_error = None
-                    logger.info(
-                        "Hinglish rewrite succeeded for slide %s after digit retry.",
-                        slide_index,
-                    )
-                    break
-
-                final_output = post_processed
+                final_output = output
                 last_error = None
                 logger.info("Hinglish rewrite succeeded for slide %s.", slide_index)
                 break
@@ -431,16 +357,9 @@ async def rewrite_all_blocks(
                     temperature=retry_temperature,
                     extra_instruction=extra_instruction,
                     max_completion_tokens=retry_max_completion_tokens,
-                    enforce_digit_guard=not num_to_words_enabled,
+                    enforce_digit_guard=True,
                 )
-                post_processed = _postprocess_hinglish_output(output)
-                if num_to_words_enabled and _has_disallowed_digits(post_processed):
-                    raise DigitPostProcessError(
-                        "Digits remain after post-processing fallback output.",
-                        finish_reason=None,
-                        model=fallback_model,
-                    )
-                rewritten.append(post_processed)
+                rewritten.append(output)
                 last_error = None
                 logger.info(
                     "Hinglish rewrite succeeded for slide %s using fallback model %s.",
@@ -449,7 +368,7 @@ async def rewrite_all_blocks(
                 )
             except HinglishRewriteError as exc:
                 last_error = exc
-                last_reason = "digits" if isinstance(exc, DigitPostProcessError) else "model failed"
+                last_reason = "model failed"
                 last_finish_reason = exc.finish_reason
                 last_model = exc.model or fallback_model
             except Exception as exc:
@@ -468,15 +387,7 @@ async def rewrite_all_blocks(
                 last_finish_reason,
             )
             await _maybe_await(on_slide_fallback, slide_index, total, last_reason)
-            if last_reason == "digits" and num_to_words_enabled:
-                fallback_block = f"[HINGLISH FALLBACK USED: digits]\n{block}"
-            else:
-                fallback_block = _postprocess_hinglish_output(block)
-                if num_to_words_enabled and _has_disallowed_digits(fallback_block):
-                    logger.warning(
-                        "Digits remain in fallback script for slide %s after post-processing.",
-                        slide_index,
-                    )
+            fallback_block = block
             rewritten.append(fallback_block)
 
     logger.info(
