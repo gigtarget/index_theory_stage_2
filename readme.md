@@ -34,6 +34,7 @@ HINGLISH_FALLBACK_MODEL="gpt-4.1-mini"  # optional
 HINGLISH_MAX_COMPLETION_TOKENS="2048"  # optional
 HINGLISH_RETRY_MAX_COMPLETION_TOKENS="4096"  # optional
 HINGLISH_MAX_RETRIES="3"  # optional
+NUM_TO_WORDS_ENABLED="1"  # optional (defaults to on)
 TARGET_WORDS="80"  # optional
 MAX_WORDS="95"     # optional
 NODE_ENV="production"
@@ -72,6 +73,9 @@ After all slides are sent, the bot posts a separate "Viewer question" message.
 - `HINGLISH_MAX_COMPLETION_TOKENS` (optional): max completion tokens for Hinglish rewrite (default `2048`).
 - `HINGLISH_RETRY_MAX_COMPLETION_TOKENS` (optional): retry max completion tokens for Hinglish rewrite (default `4096`).
 - `HINGLISH_MAX_RETRIES` (optional): max retries for Hinglish rewrite (default `3`).
+- `NUM_TO_WORDS_ENABLED` (optional): convert numerals to uppercase English words in Hinglish output (default on).
+
+Numeral-to-words conversion preserves digits inside whitelisted tokens, including `NIFTY 50`, `BANKNIFTY`, `SENSEX`, `VIX`, `S&P 500`, and ticker-like patterns such as `RELIANCE.NS` or `TCS` (case-insensitive).
 
 ### Recommended Railway settings for YouTube mode
 ```

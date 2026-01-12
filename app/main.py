@@ -205,10 +205,11 @@ async def _generate_and_send_scripts(
                         chat_id,
                         f"===== SLIDE {index}/{total_slides}: HINGLISH =====",
                     )
-                fallback_state = {"used": False}
+                fallback_state = {"used": False, "reason": ""}
 
                 async def _mark_fallback(slide_index: int, total: int, reason: str) -> None:
                     fallback_state["used"] = True
+                    fallback_state["reason"] = reason
 
                 hinglish_block = await rewrite_all_blocks(
                     [script],
@@ -218,7 +219,10 @@ async def _generate_and_send_scripts(
                 )
                 hinglish_script = hinglish_block[0] if hinglish_block else script
                 if fallback_state["used"]:
-                    display_script = f"[HINGLISH FALLBACK USED] (model failed)\n{hinglish_script}"
+                    if fallback_state["reason"] == "digits":
+                        display_script = f"[HINGLISH FALLBACK USED: digits]\n{hinglish_script}"
+                    else:
+                        display_script = f"[HINGLISH FALLBACK USED] (model failed)\n{hinglish_script}"
                 else:
                     display_script = hinglish_script
                 hinglish_scripts.append(display_script)
