@@ -36,6 +36,7 @@ from app.script_generator import (
 from app.rewrite_hinglish import rewrite_all_blocks
 from app.text_postprocess import format_allcaps_words
 from app.tts import synthesize_tts_to_file
+from app.video_creator import create_slide_video, merge_videos_concat
 
 
 logging.basicConfig(level=logging.INFO)
@@ -148,6 +149,31 @@ def _get_tts_speed() -> float:
         return 1.0
 
 
+def _get_enable_slide_videos() -> bool:
+    return os.environ.get("ENABLE_SLIDE_VIDEOS", "true").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "y",
+    }
+
+
+def _get_video_keep_files() -> bool:
+    return os.environ.get("VIDEO_KEEP_FILES", "false").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "y",
+    }
+
+
+def _get_video_fps() -> int:
+    try:
+        return int(os.environ.get("VIDEO_FPS", "30"))
+    except ValueError:
+        return 30
+
+
 def _get_tts_instructions() -> str | None:
     instructions = os.environ.get(
         "TTS_INSTRUCTIONS",
@@ -236,11 +262,17 @@ async def _send_long(
 
 
 async def _generate_and_send_scripts(
-    context: ContextTypes.DEFAULT_TYPE, chat_id: int, images: list[bytes]
+    context: ContextTypes.DEFAULT_TYPE,
+    chat_id: int,
+    images: list[bytes],
+    *,
+    watermarked_images: list[bytes] | None = None,
 ) -> None:
     if not os.environ.get("OPENAI_API_KEY"):
         await _send_message(context, chat_id, "OPENAI_API_KEY is not set in Railway Variables.")
         return
+    if watermarked_images is not None and len(watermarked_images) != len(images):
+        raise ValueError("watermarked_images length does not match images length.")
 
     status_messages: list[Message] = []
     try:
@@ -282,6 +314,12 @@ async def _generate_and_send_scripts(
             "y",
         }
         hinglish_scripts: list[str] = []
+        video_enabled = _get_enable_slide_videos()
+        video_fps = _get_video_fps()
+        video_keep_files = _get_video_keep_files()
+        clip_paths: list[Path] = []
+        if video_enabled and watermarked_images is None:
+            logger.warning("Video generation enabled, but no watermarked images provided.")
 
         if tts_provider in {"fal_kokoro", "kokoro_local"}:
             tts_format = "wav"
@@ -407,6 +445,7 @@ async def _generate_and_send_scripts(
                 if tts_enabled:
                     tts_filename = f"hinglish_slide_{index:02d}.{tts_format}"
                     tts_path = tts_dir / tts_filename
+                    tts_result = ""
                     try:
                         tts_result = await asyncio.to_thread(
                             synthesize_tts_to_file,
@@ -435,6 +474,31 @@ async def _generate_and_send_scripts(
                                     caption=f"Hinglish Audio | Slide {index}",
                                 )
                             await asyncio.sleep(tts_delay_seconds)
+                            audio_path = Path(tts_result)
+                            if (
+                                video_enabled
+                                and hinglish_enabled
+                                and watermarked_images is not None
+                                and index <= len(watermarked_images)
+                                and audio_path.exists()
+                            ):
+                                job_root = scripts_dir.parent.parent
+                                videos_dir = job_root / "videos"
+                                videos_dir.mkdir(parents=True, exist_ok=True)
+                                await _send_message(
+                                    context,
+                                    chat_id,
+                                    f"Creating video clip {index}/{total_slides}...",
+                                )
+                                clip_path = videos_dir / f"clip_{index:02d}.mp4"
+                                await asyncio.to_thread(
+                                    create_slide_video,
+                                    image_bytes=watermarked_images[index - 1],
+                                    audio_path=audio_path,
+                                    out_path=clip_path,
+                                    fps=video_fps,
+                                )
+                                clip_paths.append(clip_path)
                     except Exception as exc:  # pragma: no cover - logged for robustness
                         logger.exception(
                             "Failed to send TTS audio for slide %s: %s", index, exc
@@ -458,6 +522,30 @@ async def _generate_and_send_scripts(
 
         if hinglish_enabled and hinglish_scripts and output_mode in ["full", "both"]:
             await _send_long(context, chat_id, "\n".join(hinglish_scripts))
+        if clip_paths:
+            await _send_message(
+                context,
+                chat_id,
+                f"Merging {len(clip_paths)} clips into final video...",
+            )
+            job_root = scripts_dir.parent.parent
+            videos_dir = job_root / "videos"
+            merged_path = videos_dir / "final.mp4"
+            await asyncio.to_thread(merge_videos_concat, clip_paths, merged_path)
+            with open(merged_path, "rb") as merged_file:
+                await context.bot.send_document(
+                    chat_id=chat_id,
+                    document=merged_file,
+                    filename="index_theory_final.mp4",
+                    caption="Final merged video",
+                )
+            if not video_keep_files:
+                for clip_path in clip_paths:
+                    try:
+                        if clip_path.exists():
+                            clip_path.unlink()
+                    except Exception:
+                        logger.exception("Failed to remove clip file at %s", clip_path)
         logger.info("Completed script generation for chat_id=%s", chat_id)
     except Exception as exc:  # pragma: no cover - logged to user
         logger.exception("Failed to generate scripts for chat_id=%s: %s", chat_id, exc)
@@ -547,11 +635,10 @@ async def _process_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             await context.bot.send_document(
                 chat_id=chat_id, document=image_buffer, filename=filename
             )
-        context.chat_data["pending_images"] = images
-        await _send_message(
-            context,
-            chat_id,
-            "Slides sent. Reply CONFIRM to generate scripts, or CANCEL to discard.",
+        asyncio.create_task(
+            _generate_and_send_scripts(
+                context, chat_id, images, watermarked_images=watermarked_images
+            )
         )
         logger.info("Completed PDF processing for chat_id=%s", chat_id)
     except Exception as exc:  # pragma: no cover - logged to user
@@ -588,24 +675,6 @@ async def _handle_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 async def _handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     chat_id = update.effective_chat.id if update.effective_chat else None
     if chat_id is None:
-        return
-    message = update.effective_message
-    text = message.text.strip().lower() if message and message.text else ""
-    pending_images = context.chat_data.get("pending_images")
-    if pending_images:
-        if text in {"confirm", "yes", "proceed", "go", "ok"}:
-            context.chat_data.pop("pending_images", None)
-            asyncio.create_task(_generate_and_send_scripts(context, chat_id, pending_images))
-            return
-        if text in {"cancel", "stop", "no"}:
-            context.chat_data.pop("pending_images", None)
-            await _send_message(context, chat_id, "Cancelled. No scripts were generated.")
-            return
-        await _send_message(
-            context,
-            chat_id,
-            "Reply CONFIRM to generate scripts, or CANCEL to discard.",
-        )
         return
     await _send_message(context, chat_id, "Please upload a PDF document to process.")
 
