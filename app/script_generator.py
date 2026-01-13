@@ -423,7 +423,7 @@ def generate_viewer_question(full_script: str) -> str:
     prompt = (
         "You are creating a single short viewer question for a YouTube voiceover. "
         "Use ONLY the information already present in the script below. "
-        "Return ONLY one concise question. "
+        "Return ONLY one VERY SHORT question. "
         "Do NOT add any extra text or labels."
     )
     result = client.chat.completions.create(
