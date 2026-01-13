@@ -4,8 +4,10 @@ import logging
 import os
 import socket
 import uuid
+from datetime import datetime, timedelta, timezone
 from io import BytesIO
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 from telegram import Message, Update
 from telegram.error import Conflict
@@ -37,6 +39,12 @@ from app.text_postprocess import format_allcaps_words
 from app.transliterate_devanagari import llm_transliterate_to_devanagari
 from app.tts import prepare_tts_payload, synthesize_tts_to_file
 from app.video_creator import create_slide_video, merge_videos_concat
+from app.youtube_uploader import (
+    DEFAULT_TAGS,
+    build_description,
+    decode_b64_secrets_to_tmp,
+    upload_video,
+)
 
 
 logging.basicConfig(level=logging.INFO)
@@ -225,6 +233,80 @@ async def _send_long(
         await _send_message(context, chat_id, "\n".join(buffer).strip())
 
 
+def _format_report_date(report_date: datetime | None) -> str:
+    tz_name = os.environ.get("YT_TIMEZONE", "Asia/Kolkata")
+    try:
+        tzinfo = ZoneInfo(tz_name)
+    except Exception:
+        logger.warning("Invalid YT_TIMEZONE=%s, falling back to UTC.", tz_name)
+        tzinfo = timezone.utc
+    if report_date is None:
+        report_date = datetime.now(timezone.utc)
+    if report_date.tzinfo is None:
+        report_date = report_date.replace(tzinfo=timezone.utc)
+    local_date = report_date.astimezone(tzinfo).date()
+    return local_date.strftime("%d %b %Y")
+
+
+async def _maybe_upload_to_youtube(
+    context: ContextTypes.DEFAULT_TYPE,
+    chat_id: int,
+    final_video_path: Path,
+    report_date: datetime | None,
+) -> None:
+    if os.environ.get("YT_UPLOAD_ON_COMPLETE") != "1":
+        logger.info("YT_UPLOAD_ON_COMPLETE not enabled; skipping YouTube upload.")
+        return
+    if decode_b64_secrets_to_tmp() is None:
+        logger.warning("YouTube upload skipped due to missing credentials.")
+        return
+    delay_raw = os.environ.get("YT_SCHEDULE_DELAY_MINUTES", "60")
+    try:
+        delay_minutes = int(delay_raw)
+    except ValueError:
+        logger.warning(
+            "Invalid YT_SCHEDULE_DELAY_MINUTES=%s, defaulting to 60.", delay_raw
+        )
+        delay_minutes = 60
+    date_str = _format_report_date(report_date)
+    title = f"Post Market Report {date_str} | Jatin Dhiman | Nifty 50 | Bank Nifty"
+    description = build_description(date_str)
+    tags_env = os.environ.get("YT_KEYWORDS")
+    tags = DEFAULT_TAGS
+    if tags_env:
+        tags = [tag.strip() for tag in tags_env.split(",") if tag.strip()]
+    category_id = os.environ.get("YT_CATEGORY", "22")
+    publish_at = datetime.now(timezone.utc) + timedelta(minutes=delay_minutes)
+
+    try:
+        video_id = await asyncio.to_thread(
+            upload_video,
+            str(final_video_path),
+            title,
+            description,
+            tags,
+            category_id,
+            publish_at,
+        )
+    except Exception as exc:
+        logger.warning("YouTube upload failed: %s", exc)
+        await _send_message(
+            context,
+            chat_id,
+            f"YouTube upload failed: {exc}",
+        )
+        return
+
+    publish_time = publish_at.strftime("%Y-%m-%dT%H:%M:%SZ")
+    await _send_message(
+        context,
+        chat_id,
+        "YouTube upload scheduled.\n"
+        f"Video ID: {video_id}\n"
+        f"Publish time (UTC): {publish_time}",
+    )
+
+
 async def _send_tts_input_preview(
     context: ContextTypes.DEFAULT_TYPE,
     chat_id: int,
@@ -249,6 +331,7 @@ async def _generate_and_send_scripts(
     images: list[bytes],
     *,
     watermarked_images: list[bytes] | None = None,
+    report_date: datetime | None = None,
 ) -> None:
     if not os.environ.get("OPENAI_API_KEY"):
         await _send_message(context, chat_id, "OPENAI_API_KEY is not set in Railway Variables.")
@@ -488,6 +571,7 @@ async def _generate_and_send_scripts(
                     filename="index_theory_final.mp4",
                     caption="Final merged video",
                 )
+            await _maybe_upload_to_youtube(context, chat_id, merged_path, report_date)
             if not video_keep_files:
                 for clip_path in clip_paths:
                     try:
@@ -584,9 +668,14 @@ async def _process_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             await context.bot.send_document(
                 chat_id=chat_id, document=image_buffer, filename=filename
             )
+        report_date = message.date if message else None
         asyncio.create_task(
             _generate_and_send_scripts(
-                context, chat_id, images, watermarked_images=watermarked_images
+                context,
+                chat_id,
+                images,
+                watermarked_images=watermarked_images,
+                report_date=report_date,
             )
         )
         logger.info("Completed PDF processing for chat_id=%s", chat_id)
