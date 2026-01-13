@@ -19,8 +19,6 @@ def prepare_tts_payload(text: str, instructions: Optional[str]) -> str:
         return ""
     if len(cleaned) > MAX_TTS_CHARS:
         cleaned = cleaned[:MAX_TTS_CHARS]
-    if instructions and instructions.strip():
-        cleaned = f"{instructions.strip()} {cleaned}"
     return cleaned
 
 
