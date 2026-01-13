@@ -70,12 +70,12 @@ def _get_voice_style() -> str:
 def _hindi_instruction() -> str:
     if os.environ.get("HINDI_DEVANAGARI", "1") == "0":
         return (
-            "Output is English overall. Hindi words/phrases can be in Latin (Hinglish) "
+            "Output is English overall. Hindi words/phrases can be in Latin script "
             "or Devanagari script."
         )
     return (
         "Output is English overall, but ANY Hindi words/phrases MUST be in Devanagari script. "
-        "Never use romanized Hindi or Hinglish in Latin script."
+        "Never use romanized Hindi in Latin script."
     )
 
 
@@ -96,11 +96,11 @@ def _word_count(text: str) -> int:
     return len(text.split())
 
 
-def _enforce_word_limit(text: str, max_words: int) -> str:
+def _enforce_word_limit(text: str, max_words: int) -> tuple[str, bool]:
     words = text.split()
     if len(words) <= max_words:
-        return text.strip()
-    return " ".join(words[:max_words]).strip()
+        return text.strip(), False
+    return " ".join(words[:max_words]).strip(), True
 
 
 def _strip_leading_now(text: str) -> str:
@@ -156,7 +156,8 @@ def _generate_slide_body(
     )
     script = (result.choices[0].message.content or "").strip()
     script = _strip_leading_now(script)
-    return _enforce_word_limit(script, max_words)
+    trimmed, _ = _enforce_word_limit(script, max_words)
+    return trimmed
 
 
 def normalize_hindi_to_devanagari(text: str, client: OpenAI, model_name: str) -> str:
@@ -204,15 +205,13 @@ def humanize_full_script(full_script: str, client: OpenAI, model_name: str) -> s
 
 def create_scripts_job_dir(
     job_identifier: Optional[str] = None,
-) -> Tuple[Path, Path, Path]:
+) -> Tuple[Path, Path]:
     job_identifier = job_identifier or uuid.uuid4().hex
     scripts_dir = Path("outputs") / job_identifier / "scripts"
     original_dir = scripts_dir / "original"
-    hinglish_dir = scripts_dir / "hinglish"
     scripts_dir.mkdir(parents=True, exist_ok=True)
     original_dir.mkdir(parents=True, exist_ok=True)
-    hinglish_dir.mkdir(parents=True, exist_ok=True)
-    return scripts_dir, original_dir, hinglish_dir
+    return scripts_dir, original_dir
 
 
 def generate_script_for_slide(
@@ -250,7 +249,7 @@ def generate_script_for_slide(
         begin_line = "Lets begin."
         slide_lines = [welcome_line, theme_line, begin_line]
         script = "\n".join(line for line in slide_lines if line)
-        script = _enforce_word_limit(script, SLIDE_ONE_MAX_WORDS)
+        script, _ = _enforce_word_limit(script, SLIDE_ONE_MAX_WORDS)
     else:
         slide_target_words = target_words
         slide_max_words = max_words
@@ -305,6 +304,91 @@ def generate_script_for_slide(
     return script
 
 
+_BANNED_LABELS = [
+    "slide",
+    "hook",
+    "key points",
+    "takeaway",
+    "transition",
+]
+
+
+def script_has_no_banned_labels(script: str) -> bool:
+    for line in script.splitlines():
+        cleaned = line.strip().lower()
+        if not cleaned:
+            continue
+        for label in _BANNED_LABELS:
+            if cleaned.startswith(f"{label}"):
+                return False
+    return True
+
+
+def script_is_plain_narration(script: str) -> bool:
+    return script_has_no_banned_labels(script)
+
+
+def find_transition_sentence(script: str) -> str:
+    sentences = re.split(r"(?<=[.!?])\s+", script.strip())
+    for sentence in sentences:
+        cleaned = sentence.strip()
+        lower = cleaned.lower()
+        if lower.startswith("next, we'll look at") or lower.startswith("next, we’ll look at"):
+            return cleaned
+    return ""
+
+
+def transition_mentions_intent(script: str, intent: str) -> bool:
+    transition = find_transition_sentence(script)
+    if not transition:
+        return False
+    return all(word in transition.lower() for word in intent.lower().split())
+
+
+def slide_one_has_hook(script: str) -> bool:
+    return "?" in script
+
+
+def validate_script_rules(
+    script: str,
+    *,
+    is_last: bool,
+    next_intent: str,
+    is_first: bool,
+    is_low_context: bool,
+) -> tuple[bool, list[str]]:
+    errors: list[str] = []
+    if not script_is_plain_narration(script):
+        errors.append("contains banned label")
+
+    word_count = _word_count(script)
+    if is_first and word_count > 40:
+        errors.append("slide one word cap exceeded")
+    if is_low_context and word_count > 45:
+        errors.append("low context word cap exceeded")
+
+    lowered = script.lower()
+    if not is_first and ("welcome" in lowered or "namaste" in lowered):
+        errors.append("banned greeting")
+
+    if is_last:
+        if find_transition_sentence(script):
+            errors.append("last slide has next transition")
+        if "like" not in lowered or "subscribe" not in lowered:
+            errors.append("missing cta")
+        if not any(token in lowered for token in ["risk", "protect", "capital", "over-trading"]):
+            errors.append("missing risk note")
+    else:
+        if not find_transition_sentence(script):
+            errors.append("missing transition")
+        if any(token in lowered for token in ["like", "subscribe"]):
+            errors.append("cta not allowed")
+        if next_intent and not transition_mentions_intent(script, next_intent):
+            errors.append("transition intent missing")
+
+    return not errors, errors
+
+
 def generate_scripts_from_images(
     images: List[bytes],
     model_name: str,
@@ -314,7 +398,7 @@ def generate_scripts_from_images(
     client = _build_client()
     scripts: List[str] = []
     total_slides = len(images)
-    scripts_dir, _, _ = create_scripts_job_dir()
+    scripts_dir, _ = create_scripts_job_dir()
 
     for index, image in enumerate(images, start=1):
         logger.info("Generating script for slide %s/%s", index, total_slides)
