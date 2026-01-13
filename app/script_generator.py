@@ -233,14 +233,16 @@ def generate_script_for_slide(
             SLIDE_ONE_MIN_WORDS, min(target_words, SLIDE_ONE_MAX_WORDS)
         )
         slide_max_words = min(max_words, SLIDE_ONE_MAX_WORDS)
-        welcome_line = "नमस्ते! Welcome to Index Theory’s Post Market Report."
+        welcome_line = (
+            "Hi, this is Jatin Dhiman. Welcome to Index Theory’s Post Market Report."
+        )
         fixed_words = _word_count(welcome_line)
         body_target = max(10, slide_target_words - fixed_words)
         body_max = max(12, slide_max_words - fixed_words)
         body_instruction = (
-            "Provide exactly ONE short sentence stating today's theme and brief context "
-            "based only on this slide. Do NOT mention any date or brand line. "
-            "Do NOT add any opener, transition, or CTA."
+            "Provide exactly ONE dramatic hook sentence (6-10 words) derived only from "
+            "this slide. Do NOT mention any date, brand, welcome, or CTA. "
+            "Do NOT add any opener or transition."
         )
         body = _generate_slide_body(
             image, active_client, model_name, body_instruction, body_target, body_max
