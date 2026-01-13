@@ -164,6 +164,38 @@ def _get_tts_text_mode() -> str:
     return mode
 
 
+def _format_tts_notification(
+    *,
+    provider: str,
+    model: str,
+    voice: str,
+    response_format: str,
+    speed: float,
+    kokoro_endpoint: str,
+    kokoro_voice: str,
+    kokoro_lang: str,
+    kokoro_speed: float,
+) -> str:
+    if provider == "openai":
+        model_line = f"OpenAI model: {model}"
+        voice_line = f"Voice: {voice} | Lang: n/a"
+        speed_line = f"Format: {response_format} | Speed: {speed}"
+    elif provider == "fal_kokoro":
+        model_line = f"Kokoro (FAL) endpoint: {kokoro_endpoint}"
+        voice_line = f"Voice: {kokoro_voice} | Lang: {kokoro_lang}"
+        speed_line = f"Format: {response_format} | Speed: {kokoro_speed}"
+    else:
+        model_line = "Kokoro (local)"
+        voice_line = f"Voice: {kokoro_voice} | Lang: {kokoro_lang}"
+        speed_line = f"Format: {response_format} | Speed: {kokoro_speed}"
+    return (
+        "Generating TTS audio.\n"
+        f"{model_line}\n"
+        f"{voice_line}\n"
+        f"{speed_line}"
+    )
+
+
 def _get_instance_id() -> str:
     hostname = socket.gethostname()
     short_id = uuid.uuid4().hex[:8]
@@ -256,6 +288,23 @@ async def _generate_and_send_scripts(
             if tts_provider == "fal_kokoro" and not fal_key:
                 logger.error("TTS_PROVIDER=fal_kokoro but FAL_KEY is missing; skipping TTS.")
                 tts_enabled = False
+
+        if tts_enabled:
+            await _send_message(
+                context,
+                chat_id,
+                _format_tts_notification(
+                    provider=tts_provider,
+                    model=tts_model,
+                    voice=tts_voice,
+                    response_format=tts_format,
+                    speed=tts_speed,
+                    kokoro_endpoint=kokoro_endpoint,
+                    kokoro_voice=kokoro_voice,
+                    kokoro_lang=kokoro_lang,
+                    kokoro_speed=kokoro_speed,
+                ),
+            )
 
         for index, image in enumerate(images, start=1):
             logger.info("Generating script for slide %s/%s", index, total_slides)
