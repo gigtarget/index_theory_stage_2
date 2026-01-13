@@ -103,6 +103,32 @@ def _get_tts_model() -> str:
     return os.environ.get("TTS_MODEL", "gpt-4o-mini-tts").strip() or "gpt-4o-mini-tts"
 
 
+def _get_tts_provider() -> str:
+    provider = os.environ.get("TTS_PROVIDER", "openai").strip().lower()
+    if provider not in {"openai", "fal_kokoro"}:
+        return "openai"
+    return provider
+
+
+def _get_fal_key() -> str:
+    return os.environ.get("FAL_KEY", "").strip()
+
+
+def _get_kokoro_endpoint() -> str:
+    return os.environ.get("KOKORO_ENDPOINT", "fal-ai/kokoro/hindi").strip() or "fal-ai/kokoro/hindi"
+
+
+def _get_kokoro_voice() -> str:
+    return os.environ.get("KOKORO_VOICE", "hf_alpha").strip() or "hf_alpha"
+
+
+def _get_kokoro_speed() -> float:
+    try:
+        return float(os.environ.get("KOKORO_SPEED", "1.0"))
+    except ValueError:
+        return 1.0
+
+
 def _get_tts_voice() -> str:
     return os.environ.get("TTS_VOICE", "cedar").strip() or "cedar"
 
@@ -125,6 +151,32 @@ def _get_tts_instructions() -> str | None:
         "Keep pauses at commas and full-stops.",
     ).strip()
     return instructions or None
+
+
+def _get_tts_text_mode() -> str:
+    mode = os.environ.get("TTS_TEXT_MODE", "hinglish").strip().lower()
+    if mode not in {"hinglish", "devanagari"}:
+        return "hinglish"
+    return mode
+
+
+def _convert_hinglish_to_devanagari(text: str, *, client, model_name: str) -> str:
+    system_prompt = (
+        "You are a Hindi TTS assistant. Convert Hinglish narration into natural spoken Hindi "
+        "in Devanagari script. Keep numbers and symbols exactly as provided. Return plain text only."
+    )
+    user_prompt = f"Rewrite this narration into spoken Hindi (Devanagari only):\n{text}"
+    result = client.chat.completions.create(
+        model=model_name,
+        messages=[
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ],
+        temperature=0.3,
+        max_completion_tokens=2048,
+    )
+    msg = result.choices[0].message
+    return (getattr(msg, "content", None) or "").strip()
 
 
 def _get_instance_id() -> str:
@@ -191,11 +243,17 @@ async def _generate_and_send_scripts(
         scripts_dir, original_dir, hinglish_dir = create_scripts_job_dir()
         tts_enabled = _get_tts_enabled()
         tts_keep_files = _get_tts_keep_files()
+        tts_provider = _get_tts_provider()
         tts_model = _get_tts_model()
         tts_voice = _get_tts_voice()
         tts_format = _get_tts_format()
         tts_speed = _get_tts_speed()
         tts_instructions = _get_tts_instructions()
+        kokoro_endpoint = _get_kokoro_endpoint()
+        kokoro_voice = _get_kokoro_voice()
+        kokoro_speed = _get_kokoro_speed()
+        tts_text_mode = _get_tts_text_mode()
+        fal_key = _get_fal_key()
         tts_dir = Path("artifacts") / "tts"
         tts_delay_seconds = 0.75
         scripts: list[str] = []
@@ -206,6 +264,12 @@ async def _generate_and_send_scripts(
             "y",
         }
         hinglish_scripts: list[str] = []
+
+        if tts_provider == "fal_kokoro":
+            tts_format = "wav"
+            if not fal_key:
+                logger.error("TTS_PROVIDER=fal_kokoro but FAL_KEY is missing; skipping TTS.")
+                tts_enabled = False
 
         for index, image in enumerate(images, start=1):
             logger.info("Generating script for slide %s/%s", index, total_slides)
@@ -308,16 +372,37 @@ async def _generate_and_send_scripts(
                 if tts_enabled:
                     tts_filename = f"hinglish_slide_{index:02d}.{tts_format}"
                     tts_path = tts_dir / tts_filename
+                    tts_input = hinglish_script
+                    if tts_text_mode == "devanagari":
+                        try:
+                            tts_input = await asyncio.to_thread(
+                                _convert_hinglish_to_devanagari,
+                                hinglish_script,
+                                client=client,
+                                model_name=model_name,
+                            )
+                        except Exception as exc:  # pragma: no cover - safe fallback
+                            logger.exception(
+                                "Failed to convert Hinglish to Devanagari for slide %s: %s",
+                                index,
+                                exc,
+                            )
+                            tts_input = hinglish_script
                     try:
                         tts_result = await asyncio.to_thread(
                             synthesize_tts_to_file,
-                            hinglish_script,
+                            tts_input,
                             str(tts_path),
                             model=tts_model,
                             voice=tts_voice,
                             response_format=tts_format,
                             speed=tts_speed,
                             instructions=tts_instructions,
+                            provider=tts_provider,
+                            kokoro_voice=kokoro_voice,
+                            kokoro_speed=kokoro_speed,
+                            kokoro_endpoint=kokoro_endpoint,
+                            fal_key=fal_key or None,
                         )
                         if tts_result:
                             with open(tts_result, "rb") as audio_file:
