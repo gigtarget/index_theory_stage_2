@@ -2,6 +2,7 @@ import logging
 from pathlib import Path
 from typing import Optional
 
+import httpx
 from openai import OpenAI
 
 logger = logging.getLogger(__name__)
@@ -23,6 +24,44 @@ def _sanitize_text(text: str) -> str:
     return cleaned
 
 
+def _kokoro_fal_tts_to_file(
+    text: str,
+    out_path: str,
+    *,
+    voice: str,
+    speed: float,
+    endpoint: str,
+    fal_key: str,
+) -> str:
+    output_path = Path(out_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    payload = {
+        "prompt": text,
+        "voice": voice,
+        "speed": speed,
+    }
+    headers = {
+        "Authorization": f"Key {fal_key}",
+        "Content-Type": "application/json",
+    }
+    url = f"https://fal.run/{endpoint}"
+
+    try:
+        response = httpx.post(url, json=payload, headers=headers, timeout=60.0)
+        response.raise_for_status()
+        result = response.json()
+        audio_url = result["audio"]["url"]
+        audio_response = httpx.get(audio_url, timeout=60.0)
+        audio_response.raise_for_status()
+        output_path.write_bytes(audio_response.content)
+    except Exception as exc:  # pragma: no cover - safety net around HTTP
+        logger.exception("Kokoro TTS synthesis failed: %s", exc)
+        raise RuntimeError("Kokoro TTS synthesis failed") from exc
+
+    return str(output_path)
+
+
 def synthesize_tts_to_file(
     text: str,
     out_path: str,
@@ -32,6 +71,11 @@ def synthesize_tts_to_file(
     response_format: str,
     speed: float,
     instructions: Optional[str],
+    provider: str = "openai",
+    kokoro_voice: str = "hf_alpha",
+    kokoro_speed: float = 1.0,
+    kokoro_endpoint: str = "fal-ai/kokoro/hindi",
+    fal_key: Optional[str] = None,
 ) -> str:
     cleaned = _sanitize_text(text)
     if not cleaned:
@@ -40,6 +84,19 @@ def synthesize_tts_to_file(
 
     output_path = Path(out_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    if provider == "fal_kokoro":
+        if not fal_key:
+            logger.error("Kokoro TTS requested but FAL_KEY is missing.")
+            raise RuntimeError("Kokoro TTS not configured")
+        return _kokoro_fal_tts_to_file(
+            cleaned,
+            str(output_path),
+            voice=kokoro_voice,
+            speed=kokoro_speed,
+            endpoint=kokoro_endpoint,
+            fal_key=fal_key,
+        )
 
     client = _build_client()
     try:
