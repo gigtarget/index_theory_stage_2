@@ -350,8 +350,8 @@ async def _generate_and_send_scripts(
         tts_format = _get_tts_format()
         tts_speed = _get_tts_speed()
         tts_instructions = _get_tts_instructions()
-        tts_script_devanagari = _get_tts_script_devanagari()
-        send_tts_input_preview = _get_telegram_send_tts_input()
+        tts_script_devanagari = True
+        send_tts_input_preview = True
         tts_dir = Path("artifacts") / "tts"
         tts_delay_seconds = 0.75
         tts_transliteration_logged = False

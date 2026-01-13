@@ -1,40 +1,55 @@
-import logging
+import re
 
-from app.script_generator import _build_client, _get_model_name
+LATIN_TO_DEVANAGARI = {
+    "a": "अ",
+    "b": "ब",
+    "c": "क",
+    "d": "द",
+    "e": "ए",
+    "f": "फ",
+    "g": "ग",
+    "h": "ह",
+    "i": "इ",
+    "j": "ज",
+    "k": "क",
+    "l": "ल",
+    "m": "म",
+    "n": "न",
+    "o": "ओ",
+    "p": "प",
+    "q": "क",
+    "r": "र",
+    "s": "स",
+    "t": "त",
+    "u": "उ",
+    "v": "व",
+    "w": "व",
+    "x": "क्ष",
+    "y": "य",
+    "z": "ज",
+}
 
-logger = logging.getLogger(__name__)
+PROTECTED_SPANS = re.compile(
+    r"(https?://[^\s]+|www\.[^\s]+|\b[\w.+-]+@[\w.-]+\.\w+\b|@\w+)"
+)
 
 
-SYSTEM_PROMPT = """
-You are a strict transliteration engine. Convert Latin alphabet text to Devanagari only.
-Rules:
-- Output Devanagari script only for normal words.
-- Do NOT translate; keep identical word order and meaning.
-- Preserve punctuation, line breaks, and numerals exactly.
-- Keep all-caps acronyms/tickers (A–Z) of length 2–6 in Latin unchanged unless they contain lowercase.
-- Keep URLs, emails, and handles unchanged.
-- Return ONLY the transformed text with no commentary.
-""".strip()
+def _convert_segment(segment: str) -> str:
+    return "".join(LATIN_TO_DEVANAGARI.get(char.lower(), char) for char in segment)
 
 
 def transliterate_to_devanagari(text: str) -> str:
     if not text:
         return ""
 
-    client = _build_client()
-    model_name = _get_model_name()
-    user_prompt = (
-        "Transliterate the following text to Devanagari following the rules exactly.\n"
-        "Return ONLY the transformed text.\n\n"
-        f"{text}"
-    )
-
-    result = client.chat.completions.create(
-        model=model_name,
-        temperature=0,
-        messages=[
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": user_prompt},
-        ],
-    )
-    return (result.choices[0].message.content or "").strip()
+    parts: list[str] = []
+    cursor = 0
+    for match in PROTECTED_SPANS.finditer(text):
+        start, end = match.span()
+        if start > cursor:
+            parts.append(_convert_segment(text[cursor:start]))
+        parts.append(text[start:end])
+        cursor = end
+    if cursor < len(text):
+        parts.append(_convert_segment(text[cursor:]))
+    return "".join(parts)
