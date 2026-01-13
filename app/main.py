@@ -105,7 +105,7 @@ def _get_tts_model() -> str:
 
 def _get_tts_provider() -> str:
     provider = os.environ.get("TTS_PROVIDER", "openai").strip().lower()
-    if provider not in {"openai", "fal_kokoro"}:
+    if provider not in {"openai", "fal_kokoro", "kokoro_local"}:
         return "openai"
     return provider
 
@@ -118,8 +118,12 @@ def _get_kokoro_endpoint() -> str:
     return os.environ.get("KOKORO_ENDPOINT", "fal-ai/kokoro/hindi").strip() or "fal-ai/kokoro/hindi"
 
 
+def _get_kokoro_lang() -> str:
+    return os.environ.get("KOKORO_LANG", "h").strip() or "h"
+
+
 def _get_kokoro_voice() -> str:
-    return os.environ.get("KOKORO_VOICE", "hf_alpha").strip() or "hf_alpha"
+    return os.environ.get("KOKORO_VOICE", "hm_omega").strip() or "hm_omega"
 
 
 def _get_kokoro_speed() -> float:
@@ -158,25 +162,6 @@ def _get_tts_text_mode() -> str:
     if mode not in {"hinglish", "devanagari"}:
         return "hinglish"
     return mode
-
-
-def _convert_hinglish_to_devanagari(text: str, *, client, model_name: str) -> str:
-    system_prompt = (
-        "You are a Hindi TTS assistant. Convert Hinglish narration into natural spoken Hindi "
-        "in Devanagari script. Keep numbers and symbols exactly as provided. Return plain text only."
-    )
-    user_prompt = f"Rewrite this narration into spoken Hindi (Devanagari only):\n{text}"
-    result = client.chat.completions.create(
-        model=model_name,
-        messages=[
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_prompt},
-        ],
-        temperature=0.3,
-        max_completion_tokens=2048,
-    )
-    msg = result.choices[0].message
-    return (getattr(msg, "content", None) or "").strip()
 
 
 def _get_instance_id() -> str:
@@ -249,10 +234,11 @@ async def _generate_and_send_scripts(
         tts_format = _get_tts_format()
         tts_speed = _get_tts_speed()
         tts_instructions = _get_tts_instructions()
+        tts_text_mode = _get_tts_text_mode()
         kokoro_endpoint = _get_kokoro_endpoint()
+        kokoro_lang = _get_kokoro_lang()
         kokoro_voice = _get_kokoro_voice()
         kokoro_speed = _get_kokoro_speed()
-        tts_text_mode = _get_tts_text_mode()
         fal_key = _get_fal_key()
         tts_dir = Path("artifacts") / "tts"
         tts_delay_seconds = 0.75
@@ -265,9 +251,9 @@ async def _generate_and_send_scripts(
         }
         hinglish_scripts: list[str] = []
 
-        if tts_provider == "fal_kokoro":
+        if tts_provider in {"fal_kokoro", "kokoro_local"}:
             tts_format = "wav"
-            if not fal_key:
+            if tts_provider == "fal_kokoro" and not fal_key:
                 logger.error("TTS_PROVIDER=fal_kokoro but FAL_KEY is missing; skipping TTS.")
                 tts_enabled = False
 
@@ -372,33 +358,20 @@ async def _generate_and_send_scripts(
                 if tts_enabled:
                     tts_filename = f"hinglish_slide_{index:02d}.{tts_format}"
                     tts_path = tts_dir / tts_filename
-                    tts_input = hinglish_script
-                    if tts_text_mode == "devanagari":
-                        try:
-                            tts_input = await asyncio.to_thread(
-                                _convert_hinglish_to_devanagari,
-                                hinglish_script,
-                                client=client,
-                                model_name=model_name,
-                            )
-                        except Exception as exc:  # pragma: no cover - safe fallback
-                            logger.exception(
-                                "Failed to convert Hinglish to Devanagari for slide %s: %s",
-                                index,
-                                exc,
-                            )
-                            tts_input = hinglish_script
                     try:
                         tts_result = await asyncio.to_thread(
                             synthesize_tts_to_file,
-                            tts_input,
+                            hinglish_script,
                             str(tts_path),
                             model=tts_model,
+                            text_model=model_name,
                             voice=tts_voice,
                             response_format=tts_format,
                             speed=tts_speed,
                             instructions=tts_instructions,
+                            tts_text_mode=tts_text_mode,
                             provider=tts_provider,
+                            kokoro_lang=kokoro_lang,
                             kokoro_voice=kokoro_voice,
                             kokoro_speed=kokoro_speed,
                             kokoro_endpoint=kokoro_endpoint,
