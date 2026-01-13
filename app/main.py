@@ -2,7 +2,6 @@ import asyncio
 import json
 import logging
 import os
-import re
 import socket
 import uuid
 from io import BytesIO
@@ -35,7 +34,7 @@ from app.script_generator import (
     humanize_full_script,
 )
 from app.text_postprocess import format_allcaps_words
-from app.transliterate_devanagari import transliterate_to_devanagari
+from app.transliterate_devanagari import llm_transliterate_to_devanagari
 from app.tts import prepare_tts_payload, synthesize_tts_to_file
 from app.video_creator import create_slide_video, merge_videos_concat
 
@@ -130,6 +129,10 @@ def _get_tts_speed() -> float:
         return 1.0
 
 
+def _get_tts_transliteration_model() -> str:
+    return os.environ.get("TTS_TRANSLITERATION_MODEL", "gpt-4o-mini").strip() or "gpt-4o-mini"
+
+
 def _get_enable_slide_videos() -> bool:
     return os.environ.get("ENABLE_SLIDE_VIDEOS", "true").strip().lower() in {
         "1",
@@ -163,58 +166,6 @@ def _get_tts_instructions() -> str | None:
     return instructions or None
 
 
-def _get_tts_script_devanagari() -> bool:
-    return os.environ.get("TTS_SCRIPT_DEVANAGARI", "0").strip().lower() in {
-        "1",
-        "true",
-        "yes",
-        "y",
-    }
-
-
-def _get_telegram_send_tts_input() -> bool:
-    return os.environ.get("TELEGRAM_SEND_TTS_INPUT", "0").strip().lower() in {
-        "1",
-        "true",
-        "yes",
-        "y",
-    }
-
-
-def _collect_spans(pattern: str, text: str) -> list[tuple[int, int]]:
-    return [(match.start(), match.end()) for match in re.finditer(pattern, text)]
-
-
-def _spans_overlap(span: tuple[int, int], spans: list[tuple[int, int]]) -> bool:
-    start, end = span
-    return any(start < span_end and end > span_start for span_start, span_end in spans)
-
-
-def _redact_sensitive(text: str) -> str:
-    redacted = re.sub(r"sk-[A-Za-z0-9]{10,}", "sk-REDACTED", text)
-    url_spans = _collect_spans(r"\bhttps?://[^\s]+", redacted)
-    email_spans = _collect_spans(r"\b[\w.+-]+@[\w.-]+\.\w+\b", redacted)
-    protected_spans = url_spans + email_spans
-    token_pattern = re.compile(r"\b[A-Za-z0-9_-]{32,}\b")
-    cursor = 0
-    parts: list[str] = []
-    for match in token_pattern.finditer(redacted):
-        span = (match.start(), match.end())
-        if _spans_overlap(span, protected_spans):
-            continue
-        parts.append(redacted[cursor : span[0]])
-        parts.append("[REDACTED]")
-        cursor = span[1]
-    parts.append(redacted[cursor:])
-    return "".join(parts)
-
-
-def _chunk_text_preserve(text: str, chunk_size: int) -> list[str]:
-    if chunk_size <= 0:
-        raise ValueError("chunk_size must be positive")
-    if not text:
-        return [""]
-    return [text[i : i + chunk_size] for i in range(0, len(text), chunk_size)]
 
 
 def _format_tts_notification(
@@ -280,36 +231,16 @@ async def _send_tts_input_preview(
     *,
     slide_index: int,
     total_slides: int,
-    model: str,
-    voice: str,
-    speed: float,
     text: str,
-    chunk_limit: int = 3500,
 ) -> None:
     logger.info(
-        "Sending TTS input preview to Telegram for slide %s/%s",
+        "Sending TTS input to Telegram for slide %s/%s",
         slide_index,
         total_slides,
     )
-    safe_text = _redact_sensitive(text)
-    chunks = _chunk_text_preserve(safe_text, chunk_limit)
-    total_parts = len(chunks)
-    for part_index, chunk in enumerate(chunks, start=1):
-        title = f"TTS INPUT (SLIDE {slide_index}/{total_slides})"
-        if total_parts > 1:
-            title = f"{title} [{part_index}/{total_parts}]"
-        header = f"===== {title} ====="
-        details = f"Model: {model} | Voice: {voice} | Speed: {speed}"
-        message = "\n".join(
-            [
-                header,
-                details,
-                "----- BEGIN TEXT -----",
-                chunk,
-                "----- END TEXT -----",
-            ]
-        )
-        await _send_message(context, chat_id, message)
+    title = f"TTS INPUT (SLIDE {slide_index}/{total_slides})"
+    message = "\n".join([title, text])
+    await _send_message(context, chat_id, message)
 
 
 async def _generate_and_send_scripts(
@@ -350,8 +281,8 @@ async def _generate_and_send_scripts(
         tts_format = _get_tts_format()
         tts_speed = _get_tts_speed()
         tts_instructions = _get_tts_instructions()
+        tts_transliteration_model = _get_tts_transliteration_model()
         tts_script_devanagari = True
-        send_tts_input_preview = True
         tts_dir = Path("artifacts") / "tts"
         tts_delay_seconds = 0.75
         tts_transliteration_logged = False
@@ -453,7 +384,10 @@ async def _generate_and_send_scripts(
                         transliterated = ""
                         try:
                             transliterated = await asyncio.to_thread(
-                                transliterate_to_devanagari, script
+                                llm_transliterate_to_devanagari,
+                                script,
+                                client,
+                                tts_transliteration_model,
                             )
                         except Exception as exc:  # pragma: no cover - API fallback
                             logger.warning(
@@ -469,20 +403,17 @@ async def _generate_and_send_scripts(
                                 "Devanagari transliteration returned empty output; using original text."
                             )
                     tts_payload = prepare_tts_payload(tts_input, tts_instructions)
-                    if send_tts_input_preview and tts_payload:
+                    if tts_payload:
                         await _send_tts_input_preview(
                             context,
                             chat_id,
                             slide_index=index,
                             total_slides=total_slides,
-                            model=tts_model,
-                            voice=tts_voice,
-                            speed=tts_speed,
                             text=tts_payload,
                         )
                     tts_result = await asyncio.to_thread(
                         synthesize_tts_to_file,
-                        tts_input,
+                        tts_payload,
                         str(tts_path),
                         model=tts_model,
                         voice=tts_voice,
