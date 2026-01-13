@@ -727,10 +727,21 @@ def _build_application() -> Application:
         raise RuntimeError("TELEGRAM_BOT_TOKEN is not configured")
 
     application = ApplicationBuilder().token(bot_token).build()
+    application.add_error_handler(_handle_error)
     application.add_handler(CommandHandler("start", _handle_start))
     application.add_handler(MessageHandler(filters.Document.PDF, _handle_pdf))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, _handle_text))
     return application
+
+
+async def _handle_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+    error = context.error
+    logger.exception("Telegram error handler caught exception: %s", error)
+    if isinstance(error, Conflict):
+        logger.error(
+            "Polling conflict detected (getUpdates). Ensure only one instance is running."
+        )
+        os._exit(1)
 
 
 def main() -> None:
@@ -743,7 +754,7 @@ def main() -> None:
         logger.error(
             "Another bot instance is running. Ensure only 1 replica/service is polling."
         )
-        raise SystemExit(1)
+        os._exit(1)
 
 
 if __name__ == "__main__":
