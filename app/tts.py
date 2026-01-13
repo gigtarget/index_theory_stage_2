@@ -13,12 +13,14 @@ def _build_client() -> OpenAI:
     return OpenAI()
 
 
-def _sanitize_text(text: str) -> str:
+def prepare_tts_payload(text: str, instructions: Optional[str]) -> str:
     cleaned = text.strip()
     if not cleaned:
         return ""
     if len(cleaned) > MAX_TTS_CHARS:
         cleaned = cleaned[:MAX_TTS_CHARS]
+    if instructions and instructions.strip():
+        cleaned = f"{instructions.strip()} {cleaned}"
     return cleaned
 
 
@@ -32,12 +34,10 @@ def synthesize_tts_to_file(
     speed: float,
     instructions: Optional[str],
 ) -> str:
-    cleaned = _sanitize_text(text)
+    cleaned = prepare_tts_payload(text, instructions)
     if not cleaned:
         logger.info("Skipping TTS synthesis because text is empty.")
         return ""
-    if instructions and instructions.strip():
-        cleaned = f"{instructions.strip()} {cleaned}"
 
     output_path = Path(out_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
