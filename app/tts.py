@@ -5,6 +5,9 @@ from typing import Optional
 import httpx
 from openai import OpenAI
 
+from app.tts_kokoro import synthesize_kokoro_to_file
+from app.tts_text import hinglish_to_devanagari
+
 logger = logging.getLogger(__name__)
 
 MAX_TTS_CHARS = 3500
@@ -67,12 +70,15 @@ def synthesize_tts_to_file(
     out_path: str,
     *,
     model: str,
+    text_model: Optional[str] = None,
     voice: str,
     response_format: str,
     speed: float,
     instructions: Optional[str],
+    tts_text_mode: str = "hinglish",
     provider: str = "openai",
-    kokoro_voice: str = "hf_alpha",
+    kokoro_lang: str = "h",
+    kokoro_voice: str = "hm_omega",
     kokoro_speed: float = 1.0,
     kokoro_endpoint: str = "fal-ai/kokoro/hindi",
     fal_key: Optional[str] = None,
@@ -96,6 +102,26 @@ def synthesize_tts_to_file(
             speed=kokoro_speed,
             endpoint=kokoro_endpoint,
             fal_key=fal_key,
+        )
+
+    if provider == "kokoro_local":
+        kokoro_input = cleaned
+        if tts_text_mode == "devanagari" and text_model:
+            try:
+                kokoro_input = hinglish_to_devanagari(
+                    cleaned,
+                    model_name=text_model,
+                    client=_build_client(),
+                )
+            except Exception as exc:  # pragma: no cover - safety net
+                logger.exception("Failed to convert Hinglish to Devanagari: %s", exc)
+                kokoro_input = cleaned
+        return synthesize_kokoro_to_file(
+            kokoro_input,
+            str(output_path),
+            lang_code=kokoro_lang,
+            voice=kokoro_voice,
+            speed=kokoro_speed,
         )
 
     client = _build_client()
