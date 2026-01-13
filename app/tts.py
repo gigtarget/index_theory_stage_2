@@ -11,7 +11,6 @@ from app.tts_text import hinglish_to_devanagari
 logger = logging.getLogger(__name__)
 
 MAX_TTS_CHARS = 3500
-_logged_instructions_unsupported = False
 
 
 def _build_client() -> OpenAI:
@@ -87,6 +86,8 @@ def synthesize_tts_to_file(
     if not cleaned:
         logger.info("Skipping TTS synthesis because text is empty.")
         return ""
+    if instructions and instructions.strip():
+        cleaned = f"{instructions.strip()} {cleaned}"
 
     output_path = Path(out_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -126,36 +127,14 @@ def synthesize_tts_to_file(
 
     client = _build_client()
     try:
-        kwargs = {
-            "model": model,
-            "voice": voice,
-            "input": cleaned,
-            "response_format": response_format,
-            "speed": speed,
-        }
-        if instructions and instructions.strip():
-            kwargs["instructions"] = instructions.strip()
-        try:
-            with client.audio.speech.with_streaming_response.create(**kwargs) as response:
-                response.stream_to_file(output_path)
-        except TypeError as exc:
-            if (
-                "instructions" in str(exc)
-                and "unexpected keyword argument" in str(exc)
-                and "instructions" in kwargs
-            ):
-                global _logged_instructions_unsupported
-                if not _logged_instructions_unsupported:
-                    logger.warning(
-                        "TTS: 'instructions' not supported by installed openai SDK; "
-                        "retrying without instructions"
-                    )
-                    _logged_instructions_unsupported = True
-                kwargs.pop("instructions", None)
-                with client.audio.speech.with_streaming_response.create(**kwargs) as response:
-                    response.stream_to_file(output_path)
-            else:
-                raise
+        with client.audio.speech.with_streaming_response.create(
+            model=model,
+            voice=voice,
+            input=cleaned,
+            response_format=response_format,
+            speed=speed,
+        ) as response:
+            response.stream_to_file(output_path)
     except Exception as exc:  # pragma: no cover - safety net around SDK
         logger.exception("TTS synthesis failed: %s", exc)
         raise RuntimeError("TTS synthesis failed") from exc
