@@ -33,7 +33,6 @@ from app.script_generator import (
     generate_viewer_question,
     humanize_full_script,
 )
-from app.rewrite_hinglish import rewrite_all_blocks
 from app.text_postprocess import format_allcaps_words
 from app.tts import synthesize_tts_to_file
 from app.video_creator import create_slide_video, merge_videos_concat
@@ -104,36 +103,6 @@ def _get_tts_model() -> str:
     return os.environ.get("TTS_MODEL", "gpt-4o-mini-tts").strip() or "gpt-4o-mini-tts"
 
 
-def _get_tts_provider() -> str:
-    provider = os.environ.get("TTS_PROVIDER", "openai").strip().lower()
-    if provider not in {"openai", "fal_kokoro", "kokoro_local"}:
-        return "openai"
-    return provider
-
-
-def _get_fal_key() -> str:
-    return os.environ.get("FAL_KEY", "").strip()
-
-
-def _get_kokoro_endpoint() -> str:
-    return os.environ.get("KOKORO_ENDPOINT", "fal-ai/kokoro/hindi").strip() or "fal-ai/kokoro/hindi"
-
-
-def _get_kokoro_lang() -> str:
-    return os.environ.get("KOKORO_LANG", "h").strip() or "h"
-
-
-def _get_kokoro_voice() -> str:
-    return os.environ.get("KOKORO_VOICE", "hm_omega").strip() or "hm_omega"
-
-
-def _get_kokoro_speed() -> float:
-    try:
-        return float(os.environ.get("KOKORO_SPEED", "1.0"))
-    except ValueError:
-        return 1.0
-
-
 def _get_tts_voice() -> str:
     return os.environ.get("TTS_VOICE", "cedar").strip() or "cedar"
 
@@ -177,43 +146,21 @@ def _get_video_fps() -> int:
 def _get_tts_instructions() -> str | None:
     instructions = os.environ.get(
         "TTS_INSTRUCTIONS",
-        "Speak in a clear Indian-English market-news tone with natural Hinglish flow. "
-        "Keep pauses at commas and full-stops.",
+        "Speak in a clear Indian-English market-news tone. Keep pauses at commas and full-stops.",
     ).strip()
     return instructions or None
 
 
-def _get_tts_text_mode() -> str:
-    mode = os.environ.get("TTS_TEXT_MODE", "hinglish").strip().lower()
-    if mode not in {"hinglish", "devanagari"}:
-        return "hinglish"
-    return mode
-
-
 def _format_tts_notification(
     *,
-    provider: str,
     model: str,
     voice: str,
     response_format: str,
     speed: float,
-    kokoro_endpoint: str,
-    kokoro_voice: str,
-    kokoro_lang: str,
-    kokoro_speed: float,
 ) -> str:
-    if provider == "openai":
-        model_line = f"OpenAI model: {model}"
-        voice_line = f"Voice: {voice} | Lang: n/a"
-        speed_line = f"Format: {response_format} | Speed: {speed}"
-    elif provider == "fal_kokoro":
-        model_line = f"Kokoro (FAL) endpoint: {kokoro_endpoint}"
-        voice_line = f"Voice: {kokoro_voice} | Lang: {kokoro_lang}"
-        speed_line = f"Format: {response_format} | Speed: {kokoro_speed}"
-    else:
-        model_line = "Kokoro (local)"
-        voice_line = f"Voice: {kokoro_voice} | Lang: {kokoro_lang}"
-        speed_line = f"Format: {response_format} | Speed: {kokoro_speed}"
+    model_line = f"OpenAI model: {model}"
+    voice_line = f"Voice: {voice} | Lang: n/a"
+    speed_line = f"Format: {response_format} | Speed: {speed}"
     return (
         "Generating TTS audio.\n"
         f"{model_line}\n"
@@ -289,31 +236,17 @@ async def _generate_and_send_scripts(
         output_mode = _get_output_mode()
         total_slides = len(images)
         client = _build_client()
-        scripts_dir, original_dir, hinglish_dir = create_scripts_job_dir()
+        scripts_dir, original_dir = create_scripts_job_dir()
         tts_enabled = _get_tts_enabled()
         tts_keep_files = _get_tts_keep_files()
-        tts_provider = _get_tts_provider()
         tts_model = _get_tts_model()
         tts_voice = _get_tts_voice()
         tts_format = _get_tts_format()
         tts_speed = _get_tts_speed()
         tts_instructions = _get_tts_instructions()
-        tts_text_mode = _get_tts_text_mode()
-        kokoro_endpoint = _get_kokoro_endpoint()
-        kokoro_lang = _get_kokoro_lang()
-        kokoro_voice = _get_kokoro_voice()
-        kokoro_speed = _get_kokoro_speed()
-        fal_key = _get_fal_key()
         tts_dir = Path("artifacts") / "tts"
         tts_delay_seconds = 0.75
         scripts: list[str] = []
-        hinglish_enabled = os.environ.get("ENABLE_HINGLISH_REWRITE", "true").strip().lower() in {
-            "1",
-            "true",
-            "yes",
-            "y",
-        }
-        hinglish_scripts: list[str] = []
         video_enabled = _get_enable_slide_videos()
         video_fps = _get_video_fps()
         video_keep_files = _get_video_keep_files()
@@ -321,26 +254,15 @@ async def _generate_and_send_scripts(
         if video_enabled and watermarked_images is None:
             logger.warning("Video generation enabled, but no watermarked images provided.")
 
-        if tts_provider in {"fal_kokoro", "kokoro_local"}:
-            tts_format = "wav"
-            if tts_provider == "fal_kokoro" and not fal_key:
-                logger.error("TTS_PROVIDER=fal_kokoro but FAL_KEY is missing; skipping TTS.")
-                tts_enabled = False
-
         if tts_enabled:
             await _send_message(
                 context,
                 chat_id,
                 _format_tts_notification(
-                    provider=tts_provider,
                     model=tts_model,
                     voice=tts_voice,
                     response_format=tts_format,
                     speed=tts_speed,
-                    kokoro_endpoint=kokoro_endpoint,
-                    kokoro_voice=kokoro_voice,
-                    kokoro_lang=kokoro_lang,
-                    kokoro_speed=kokoro_speed,
                 ),
             )
 
@@ -408,109 +330,62 @@ async def _generate_and_send_scripts(
             if output_mode in ["slides", "both"]:
                 await _send_long(context, chat_id, script)
 
-            if hinglish_enabled:
-                if output_mode in ["slides", "both"]:
-                    await _send_message(
-                        context,
-                        chat_id,
-                        f"===== SLIDE {index}/{total_slides}: HINGLISH =====",
+            if tts_enabled:
+                tts_filename = f"slide_{index:02d}.{tts_format}"
+                tts_path = tts_dir / tts_filename
+                tts_result = ""
+                try:
+                    tts_result = await asyncio.to_thread(
+                        synthesize_tts_to_file,
+                        script,
+                        str(tts_path),
+                        model=tts_model,
+                        voice=tts_voice,
+                        response_format=tts_format,
+                        speed=tts_speed,
+                        instructions=tts_instructions,
                     )
-                fallback_state = {"used": False, "reason": ""}
-
-                async def _mark_fallback(slide_index: int, total: int, reason: str) -> None:
-                    fallback_state["used"] = True
-                    fallback_state["reason"] = reason
-
-                hinglish_block = await rewrite_all_blocks(
-                    [script],
-                    client=client,
-                    on_slide_fallback=_mark_fallback,
-                    slide_indices=[index],
-                )
-                hinglish_script = hinglish_block[0] if hinglish_block else script
-                hinglish_script = format_allcaps_words(hinglish_script)
-                if fallback_state["used"]:
-                    if fallback_state["reason"] == "digits":
-                        display_script = f"[HINGLISH FALLBACK USED: digits]\n{hinglish_script}"
-                    else:
-                        display_script = f"[HINGLISH FALLBACK USED] (model failed)\n{hinglish_script}"
-                else:
-                    display_script = hinglish_script
-                hinglish_scripts.append(display_script)
-                hinglish_path = hinglish_dir / f"slide_{index}.txt"
-                hinglish_path.write_text(hinglish_script, encoding="utf-8")
-                if output_mode in ["slides", "both"]:
-                    await _send_long(context, chat_id, display_script)
-
-                if tts_enabled:
-                    tts_filename = f"hinglish_slide_{index:02d}.{tts_format}"
-                    tts_path = tts_dir / tts_filename
-                    tts_result = ""
-                    try:
-                        tts_result = await asyncio.to_thread(
-                            synthesize_tts_to_file,
-                            hinglish_script,
-                            str(tts_path),
-                            model=tts_model,
-                            text_model=model_name,
-                            voice=tts_voice,
-                            response_format=tts_format,
-                            speed=tts_speed,
-                            instructions=tts_instructions,
-                            tts_text_mode=tts_text_mode,
-                            provider=tts_provider,
-                            kokoro_lang=kokoro_lang,
-                            kokoro_voice=kokoro_voice,
-                            kokoro_speed=kokoro_speed,
-                            kokoro_endpoint=kokoro_endpoint,
-                            fal_key=fal_key or None,
-                        )
-                        if tts_result:
-                            with open(tts_result, "rb") as audio_file:
-                                await context.bot.send_audio(
-                                    chat_id=chat_id,
-                                    audio=audio_file,
-                                    filename=tts_filename,
-                                    caption=f"Hinglish Audio | Slide {index}",
-                                )
-                            await asyncio.sleep(tts_delay_seconds)
-                            audio_path = Path(tts_result)
-                            if (
-                                video_enabled
-                                and hinglish_enabled
-                                and watermarked_images is not None
-                                and index <= len(watermarked_images)
-                                and audio_path.exists()
-                            ):
-                                job_root = scripts_dir.parent.parent
-                                videos_dir = job_root / "videos"
-                                videos_dir.mkdir(parents=True, exist_ok=True)
-                                await _send_message(
-                                    context,
-                                    chat_id,
-                                    f"Creating video clip {index}/{total_slides}...",
-                                )
-                                clip_path = videos_dir / f"clip_{index:02d}.mp4"
-                                await asyncio.to_thread(
-                                    create_slide_video,
-                                    image_bytes=watermarked_images[index - 1],
-                                    audio_path=audio_path,
-                                    out_path=clip_path,
-                                    fps=video_fps,
-                                )
-                                clip_paths.append(clip_path)
-                    except Exception as exc:  # pragma: no cover - logged for robustness
-                        logger.exception(
-                            "Failed to send TTS audio for slide %s: %s", index, exc
-                        )
-                    finally:
-                        if not tts_keep_files and tts_path.exists():
-                            try:
-                                tts_path.unlink()
-                            except Exception:
-                                logger.exception(
-                                    "Failed to delete TTS file at %s", tts_path
-                                )
+                    if tts_result:
+                        with open(tts_result, "rb") as audio_file:
+                            await context.bot.send_audio(
+                                chat_id=chat_id,
+                                audio=audio_file,
+                                filename=tts_filename,
+                                caption=f"Audio | Slide {index}",
+                            )
+                        await asyncio.sleep(tts_delay_seconds)
+                        audio_path = Path(tts_result)
+                        if (
+                            video_enabled
+                            and watermarked_images is not None
+                            and index <= len(watermarked_images)
+                            and audio_path.exists()
+                        ):
+                            job_root = scripts_dir.parent.parent
+                            videos_dir = job_root / "videos"
+                            videos_dir.mkdir(parents=True, exist_ok=True)
+                            await _send_message(
+                                context,
+                                chat_id,
+                                f"Creating video clip {index}/{total_slides}...",
+                            )
+                            clip_path = videos_dir / f"clip_{index:02d}.mp4"
+                            await asyncio.to_thread(
+                                create_slide_video,
+                                image_bytes=watermarked_images[index - 1],
+                                audio_path=audio_path,
+                                out_path=clip_path,
+                                fps=video_fps,
+                            )
+                            clip_paths.append(clip_path)
+                except Exception as exc:  # pragma: no cover - logged for robustness
+                    logger.exception("Failed to send TTS audio for slide %s: %s", index, exc)
+                finally:
+                    if not tts_keep_files and tts_path.exists():
+                        try:
+                            tts_path.unlink()
+                        except Exception:
+                            logger.exception("Failed to delete TTS file at %s", tts_path)
 
         if output_mode in ["full", "both"]:
             full_payload = "\n".join(scripts)
@@ -520,8 +395,6 @@ async def _generate_and_send_scripts(
                 )
             await _send_long(context, chat_id, full_payload)
 
-        if hinglish_enabled and hinglish_scripts and output_mode in ["full", "both"]:
-            await _send_long(context, chat_id, "\n".join(hinglish_scripts))
         if clip_paths:
             await _send_message(
                 context,
