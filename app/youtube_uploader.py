@@ -40,6 +40,11 @@ def decode_b64_secrets_to_tmp() -> Optional[tuple[Path, Path]]:
             "YouTube upload skipped: missing YT_CLIENT_SECRETS_B64 or YT_TOKEN_B64."
         )
         return None
+    logger.info(
+        "YouTube secrets provided. client_len=%s token_len=%s",
+        len(client_b64),
+        len(token_b64),
+    )
 
     tmp_dir = Path("/tmp/yt")
     tmp_dir.mkdir(parents=True, exist_ok=True)
@@ -53,6 +58,11 @@ def decode_b64_secrets_to_tmp() -> Optional[tuple[Path, Path]]:
         logger.warning("Failed to decode YouTube secrets: %s", exc)
         return None
 
+    logger.info(
+        "Wrote YouTube secrets to %s and %s",
+        client_path,
+        token_path,
+    )
     return client_path, token_path
 
 
@@ -62,6 +72,7 @@ def build_youtube_client() -> Optional[object]:
         return None
 
     _, token_path = decoded
+    logger.info("Loading YouTube token from %s", token_path)
     try:
         credentials = Credentials.from_authorized_user_file(
             str(token_path), scopes=UPLOAD_SCOPES
@@ -70,6 +81,12 @@ def build_youtube_client() -> Optional[object]:
         logger.warning("Failed to load YouTube token: %s", exc)
         return None
 
+    logger.info(
+        "YouTube credentials loaded. valid=%s expired=%s has_refresh=%s",
+        credentials.valid,
+        credentials.expired,
+        bool(credentials.refresh_token),
+    )
     if not credentials.valid:
         if credentials.expired and credentials.refresh_token:
             try:
@@ -81,6 +98,7 @@ def build_youtube_client() -> Optional[object]:
             logger.warning("YouTube credentials are invalid or missing refresh token.")
             return None
 
+    logger.info("Building YouTube API client.")
     return build("youtube", "v3", credentials=credentials)
 
 
@@ -117,11 +135,29 @@ def upload_video(
     if service is None:
         raise RuntimeError("YouTube client not configured")
 
+    path = Path(file_path)
+    try:
+        file_size = path.stat().st_size
+    except OSError as exc:
+        logger.warning("Failed to stat video file %s: %s", path, exc)
+        file_size = None
+
+    tags_list = list(tags)
+    logger.info(
+        "Starting YouTube upload. path=%s size=%s title=%s tags=%s category=%s publish_at=%s",
+        path,
+        file_size,
+        title,
+        len(tags_list),
+        category_id,
+        _rfc3339_utc(publish_at_utc),
+    )
+
     body = {
         "snippet": {
             "title": title,
             "description": description,
-            "tags": list(tags),
+            "tags": tags_list,
             "categoryId": category_id,
         },
         "status": {
