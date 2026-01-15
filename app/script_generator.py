@@ -67,25 +67,13 @@ def _get_voice_style() -> str:
     return style
 
 
-def _hindi_instruction() -> str:
-    if os.environ.get("HINDI_DEVANAGARI", "1") == "0":
-        return (
-            "Output is English overall. Hindi words/phrases can be in Latin script "
-            "or Devanagari script."
-        )
-    return (
-        "Output is English overall, but ANY Hindi words/phrases MUST be in Devanagari script. "
-        "Never use romanized Hindi in Latin script."
-    )
-
-
 def _system_prompt() -> str:
     base = (
         BASE_SYSTEM_PROMPT_YOUTUBE
         if _get_voice_style() == "youtube"
         else BASE_SYSTEM_PROMPT
     )
-    return f"{base}\n{_hindi_instruction()}".strip()
+    return base.strip()
 
 
 def _encode_image(image: bytes) -> str:
@@ -160,24 +148,6 @@ def _generate_slide_body(
     return trimmed
 
 
-def normalize_hindi_to_devanagari(text: str, client: OpenAI, model_name: str) -> str:
-    if os.environ.get("HINDI_DEVANAGARI", "1") == "0":
-        return text
-    prompt = (
-        "Convert ONLY romanized Hindi words/phrases into Devanagari. "
-        "Do NOT translate English. Do NOT change numbers, tickers, or symbols. "
-        "Return ONLY the corrected text."
-    )
-    result = client.chat.completions.create(
-        model=model_name,
-        messages=[
-            {"role": "system", "content": prompt},
-            {"role": "user", "content": text},
-        ],
-    )
-    return (result.choices[0].message.content or "").strip()
-
-
 def humanize_full_script(full_script: str, client: OpenAI, model_name: str) -> str:
     prompt = (
         "Rewrite this into ONE continuous YouTube talk-track. "
@@ -194,7 +164,6 @@ def humanize_full_script(full_script: str, client: OpenAI, model_name: str) -> s
     )
     output = (result.choices[0].message.content or "").strip()
     output = _remove_repeated_phrases(output, BANNED_REPETITIVE_PHRASES)
-    output = normalize_hindi_to_devanagari(output, client, model_name)
     input_digits = set(_digit_sequences(full_script))
     output_digits = set(_digit_sequences(output))
     if not input_digits.issubset(output_digits):
@@ -280,8 +249,6 @@ def generate_script_for_slide(
                 "Hit the bell for updates.",
             ]
             script = f"{script}\n" + "\n".join(cta_lines)
-
-    script = normalize_hindi_to_devanagari(script, active_client, model_name)
 
     if scripts_dir is not None:
         scripts_dir = Path(scripts_dir)
@@ -436,7 +403,6 @@ def generate_viewer_question(full_script: str) -> str:
         ],
     )
     question = (result.choices[0].message.content or "").strip()
-    question = normalize_hindi_to_devanagari(question, client, model_name)
     if question and not question.endswith("?"):
         question = f"{question}?"
     return question
