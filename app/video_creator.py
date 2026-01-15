@@ -12,6 +12,10 @@ from telegram import Bot
 logger = logging.getLogger(__name__)
 
 
+class VideoMergeError(RuntimeError):
+    pass
+
+
 def ensure_dir(path: Path) -> None:
     path.mkdir(parents=True, exist_ok=True)
 
@@ -168,6 +172,12 @@ def _format_progress_message(
         percent = min(100, int(out_time_ms / total_duration_ms * 100))
         return f"🎬 {title}: {percent}% ({time_str} / {total_str}) speed {speed_str}"
     return f"🎬 {title}: {time_str} speed {speed_str}"
+
+
+def _coerce_even(value: int) -> int:
+    if value % 2 == 0:
+        return value
+    return value - 1 if value > 1 else value + 1
 
 
 async def _read_stderr(
@@ -363,109 +373,191 @@ async def merge_videos_concat(
     chat_id: int,
     bot: Bot,
 ) -> None:
-    ensure_dir(out_path.parent)
     try:
-        fps = int(os.environ.get("VIDEO_FPS", "30"))
-    except ValueError:
-        fps = 30
-    intro_path = Path(__file__).resolve().parents[1] / "material" / "intro_video.mp4"
-    if intro_path.exists():
-        concat_paths = [intro_path, *video_paths]
-    else:
-        concat_paths = list(video_paths)
-    target_width = 1920
-    target_height = 1080
-    reference_path = video_paths[0] if video_paths else None
-    if reference_path is not None:
-        reference_info = await asyncio.to_thread(probe_video_stream_info, reference_path)
-        if reference_info:
-            target_width = int(reference_info["width"])
-            target_height = int(reference_info["height"])
-    logger.info("concat target: %sx%s fps=30", target_width, target_height)
-    durations: list[float] = []
-    if concat_paths:
+        ensure_dir(out_path.parent)
+        try:
+            fps = int(os.environ.get("VIDEO_FPS", "30"))
+        except ValueError:
+            fps = 30
+        try:
+            target_max = int(os.environ.get("VIDEO_TARGET_MAX", "1920"))
+        except ValueError:
+            target_max = 1920
+        intro_path = Path(__file__).resolve().parents[1] / "material" / "intro_video.mp4"
+        if intro_path.exists():
+            concat_paths = [intro_path, *video_paths]
+        else:
+            concat_paths = list(video_paths)
+        if not concat_paths:
+            raise VideoMergeError("No videos to merge.")
+        target_width = 1920
+        target_height = 1080
+        reference_path = concat_paths[0] if concat_paths else None
+        if reference_path is not None:
+            reference_info = await asyncio.to_thread(probe_video_stream_info, reference_path)
+            if reference_info:
+                target_width = int(reference_info["width"])
+                target_height = int(reference_info["height"])
+        if target_max and target_width > target_max:
+            scale_ratio = target_max / target_width
+            target_width = int(round(target_width * scale_ratio))
+            target_height = int(round(target_height * scale_ratio))
+        target_width = _coerce_even(target_width)
+        target_height = _coerce_even(target_height)
+        logger.info("concat target: %sx%s fps=%s", target_width, target_height, fps)
+        durations: list[float] = []
         for path in concat_paths:
             durations.append(float(await asyncio.to_thread(probe_duration_seconds, path)))
-    input_cmd: list[str] = []
-    for path in concat_paths:
-        input_cmd.extend(["-i", str(path)])
-    filter_parts: list[str] = []
-    for index, path in enumerate(concat_paths):
-        duration = durations[index]
-        v_label = f"v{index}"
-        a_label = f"a{index}"
-        stream_info = await asyncio.to_thread(probe_video_stream_info, path)
-        filter_parts.append(
-            f"[{index}:v:0]"
-            f"scale={target_width}:{target_height}:force_original_aspect_ratio=decrease,"
-            f"pad={target_width}:{target_height}:(ow-iw)/2:(oh-ih)/2,"
-            "fps=30,format=yuv420p,setsar=1,setpts=PTS-STARTPTS"
-            f"[{v_label}]"
-        )
-        has_audio = await asyncio.to_thread(probe_has_audio_stream, path)
-        if stream_info:
-            logger.info(
-                "concat input %s: path=%s size=%sx%s fps=%s has_audio=%s dur=%.3f",
-                index,
-                path,
-                stream_info["width"],
-                stream_info["height"],
-                f"{stream_info.get('fps', 'n/a'):.3f}"
-                if isinstance(stream_info.get("fps"), float)
-                else stream_info.get("fps", "n/a"),
-                has_audio,
-                duration,
+        total_duration = sum(durations)
+        total_duration_ms = int(total_duration * 1000) if total_duration else None
+
+        norm_dir = out_path.parent / "_norm"
+        ensure_dir(norm_dir)
+        normalized_paths: list[Path] = []
+        total_clips = len(concat_paths)
+        for index, path in enumerate(concat_paths):
+            duration = durations[index]
+            norm_path = norm_dir / f"norm_{index:02d}.mp4"
+            has_audio = await asyncio.to_thread(probe_has_audio_stream, path)
+            stream_info = await asyncio.to_thread(probe_video_stream_info, path)
+            if stream_info:
+                logger.info(
+                    "normalize input %s: path=%s size=%sx%s fps=%s has_audio=%s dur=%.3f",
+                    index,
+                    path,
+                    stream_info["width"],
+                    stream_info["height"],
+                    f"{stream_info.get('fps', 'n/a'):.3f}"
+                    if isinstance(stream_info.get("fps"), float)
+                    else stream_info.get("fps", "n/a"),
+                    has_audio,
+                    duration,
+                )
+            else:
+                logger.info(
+                    "normalize input %s: path=%s has_audio=%s dur=%.3f",
+                    index,
+                    path,
+                    has_audio,
+                    duration,
+                )
+            vf_filter = (
+                f"scale={target_width}:{target_height}:force_original_aspect_ratio=decrease,"
+                f"pad={target_width}:{target_height}:(ow-iw)/2:(oh-ih)/2,"
+                f"fps={fps},format=yuv420p,setsar=1"
             )
-        else:
-            logger.info(
-                "concat input %s: path=%s has_audio=%s dur=%.3f",
-                index,
-                path,
-                has_audio,
-                duration,
+            cmd = [
+                "ffmpeg",
+                "-y",
+                "-i",
+                str(path),
+            ]
+            if not has_audio:
+                cmd.extend(
+                    [
+                        "-f",
+                        "lavfi",
+                        "-i",
+                        "anullsrc=channel_layout=stereo:sample_rate=48000",
+                    ]
+                )
+            cmd.extend(
+                [
+                    "-vf",
+                    vf_filter,
+                    "-af",
+                    "aformat=sample_rates=48000:channel_layouts=stereo",
+                    "-map",
+                    "0:v:0",
+                    "-map",
+                    "1:a:0" if not has_audio else "0:a:0",
+                    "-c:v",
+                    "libx264",
+                    "-preset",
+                    "veryfast",
+                    "-crf",
+                    "20",
+                    "-c:a",
+                    "aac",
+                    "-b:a",
+                    "192k",
+                    "-movflags",
+                    "+faststart",
+                ]
             )
-        if has_audio:
-            filter_parts.append(
-                f"[{index}:a:0]"
-                "aformat=sample_rates=48000:channel_layouts=stereo,"
-                f"asetpts=PTS-STARTPTS[{a_label}]"
+            if not has_audio:
+                cmd.append("-shortest")
+            cmd.append(str(norm_path))
+            total_duration_ms = int(duration * 1000) if duration else None
+            await run_ffmpeg_with_telegram_progress(
+                cmd,
+                chat_id,
+                bot,
+                f"Normalizing clip {index + 1}/{total_clips}",
+                total_duration_ms,
             )
-        else:
-            filter_parts.append(
-                "anullsrc=channel_layout=stereo:sample_rate=48000,"
-                f"atrim=0:{duration:.3f},asetpts=PTS-STARTPTS[{a_label}]"
+            normalized_paths.append(norm_path)
+
+        concat_list_path = norm_dir / "concat_list.txt"
+        concat_lines = [f"file '{path.name}'" for path in normalized_paths]
+        concat_list_path.write_text("\n".join(concat_lines) + "\n", encoding="utf-8")
+
+        concat_cmd = [
+            "ffmpeg",
+            "-y",
+            "-f",
+            "concat",
+            "-safe",
+            "0",
+            "-i",
+            str(concat_list_path),
+            "-c",
+            "copy",
+            "-movflags",
+            "+faststart",
+            str(out_path),
+        ]
+        try:
+            await run_ffmpeg_with_telegram_progress(
+                concat_cmd,
+                chat_id,
+                bot,
+                "Concatenating clips...",
+                total_duration_ms,
             )
-    filter_inputs = "".join(f"[v{index}][a{index}]" for index in range(len(concat_paths)))
-    filter_parts.append(f"{filter_inputs}concat=n={len(concat_paths)}:v=1:a=1[v][a]")
-    filter_complex = ";".join(filter_parts)
-    cmd = [
-        "ffmpeg",
-        "-y",
-        *input_cmd,
-        "-filter_complex",
-        filter_complex,
-        "-map",
-        "[v]",
-        "-map",
-        "[a]",
-        "-c:v",
-        "libx264",
-        "-c:a",
-        "aac",
-        "-pix_fmt",
-        "yuv420p",
-        "-r",
-        str(fps),
-        "-movflags",
-        "+faststart",
-        str(out_path),
-    ]
-    total_duration = sum(durations)
-    total_duration_ms = int(total_duration * 1000) if total_duration else None
-    await run_ffmpeg_with_telegram_progress(
-        cmd,
-        chat_id,
-        bot,
-        "Concatenating",
-        total_duration_ms,
-    )
+        except RuntimeError as exc:
+            logger.warning("Stream copy concat failed; retrying with re-encode. error=%s", exc)
+            concat_cmd = [
+                "ffmpeg",
+                "-y",
+                "-f",
+                "concat",
+                "-safe",
+                "0",
+                "-i",
+                str(concat_list_path),
+                "-c:v",
+                "libx264",
+                "-preset",
+                "veryfast",
+                "-crf",
+                "20",
+                "-c:a",
+                "aac",
+                "-b:a",
+                "192k",
+                "-movflags",
+                "+faststart",
+                str(out_path),
+            ]
+            await run_ffmpeg_with_telegram_progress(
+                concat_cmd,
+                chat_id,
+                bot,
+                "Concatenating clips...",
+                total_duration_ms,
+            )
+    except VideoMergeError:
+        raise
+    except Exception as exc:
+        raise VideoMergeError("Failed to merge video") from exc

@@ -38,7 +38,7 @@ from app.script_generator import (
 from app.text_postprocess import format_allcaps_words
 from app.transliterate_devanagari import llm_transliterate_to_devanagari
 from app.tts import prepare_tts_payload, synthesize_tts_to_file
-from app.video_creator import create_slide_video, merge_videos_concat
+from app.video_creator import VideoMergeError, create_slide_video, merge_videos_concat
 from app.youtube_uploader import (
     DEFAULT_TAGS,
     build_description,
@@ -587,7 +587,10 @@ async def _generate_and_send_scripts(
                         logger.exception("Failed to remove clip file at %s", clip_path)
         logger.info("Completed script generation for chat_id=%s", chat_id)
     except Exception as exc:  # pragma: no cover - logged to user
-        logger.exception("Failed to generate scripts for chat_id=%s: %s", chat_id, exc)
+        if isinstance(exc, VideoMergeError):
+            logger.exception("Failed to merge video for chat_id=%s: %s", chat_id, exc)
+        else:
+            logger.exception("Failed to generate scripts for chat_id=%s: %s", chat_id, exc)
         await _send_message(
             context, chat_id, f"Error: {exc}. Check Railway logs."
         )
