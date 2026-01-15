@@ -68,26 +68,18 @@ def probe_has_audio_stream(media_path: Path) -> bool:
         "-v",
         "error",
         "-select_streams",
-        "a",
+        "a:0",
         "-show_entries",
-        "stream=index",
+        "stream=codec_type",
         "-of",
-        "csv=p=0",
+        "default=nw=1:nk=1",
         str(media_path),
     ]
     try:
-        result = subprocess.run(cmd, check=True, capture_output=True, text=True)
-    except subprocess.CalledProcessError as exc:  # pragma: no cover - surfaced to caller
-        command_text = _format_command(cmd)
-        logger.error(
-            "ffprobe failed to read audio streams. cmd=%s stderr=%s",
-            command_text,
-            exc.stderr,
-        )
-        raise RuntimeError(
-            f"ffprobe failed to read audio streams. cmd={command_text} stderr={exc.stderr}"
-        ) from exc
-    return bool(result.stdout.strip())
+        result = subprocess.run(cmd, capture_output=True, text=True)
+    except Exception:  # pragma: no cover - surfaced to caller
+        return False
+    return result.returncode == 0 and bool(result.stdout.strip())
 
 
 def _format_duration(ms: int) -> str:
@@ -328,34 +320,39 @@ async def merge_videos_concat(
     else:
         concat_paths = list(video_paths)
     durations: list[float] = []
-    has_audio: list[bool] = []
     if concat_paths:
         for path in concat_paths:
-            durations.append(await asyncio.to_thread(probe_duration_seconds, path))
-            has_audio.append(await asyncio.to_thread(probe_has_audio_stream, path))
+            durations.append(float(await asyncio.to_thread(probe_duration_seconds, path)))
     input_cmd: list[str] = []
     for path in concat_paths:
         input_cmd.extend(["-i", str(path)])
     filter_parts: list[str] = []
-    for index in range(len(concat_paths)):
-        filter_parts.append(f"[{index}:v:0]setpts=PTS-STARTPTS[v{index}]")
-        if has_audio[index]:
+    for index, path in enumerate(concat_paths):
+        duration = durations[index]
+        v_label = f"v{index}"
+        a_label = f"a{index}"
+        filter_parts.append(f"[{index}:v:0]setpts=PTS-STARTPTS[{v_label}]")
+        has_audio = await asyncio.to_thread(probe_has_audio_stream, path)
+        logger.info(
+            "concat input %s: path=%s has_audio=%s dur=%.3f",
+            index,
+            path,
+            has_audio,
+            duration,
+        )
+        if has_audio:
             filter_parts.append(
                 f"[{index}:a:0]"
                 "aformat=sample_rates=48000:channel_layouts=stereo,"
-                f"asetpts=PTS-STARTPTS[a{index}]"
+                f"asetpts=PTS-STARTPTS[{a_label}]"
             )
         else:
             filter_parts.append(
                 "anullsrc=channel_layout=stereo:sample_rate=48000,"
-                f"atrim=0:{durations[index]:.3f},asetpts=PTS-STARTPTS[a{index}]"
+                f"atrim=0:{duration:.3f},asetpts=PTS-STARTPTS[{a_label}]"
             )
-    filter_inputs = "".join(
-        f"[v{index}][a{index}]" for index in range(len(concat_paths))
-    )
-    filter_parts.append(
-        f"{filter_inputs}concat=n={len(concat_paths)}:v=1:a=1[v][a]"
-    )
+    filter_inputs = "".join(f"[v{index}][a{index}]" for index in range(len(concat_paths)))
+    filter_parts.append(f"{filter_inputs}concat=n={len(concat_paths)}:v=1:a=1[v][a]")
     filter_complex = ";".join(filter_parts)
     cmd = [
         "ffmpeg",
