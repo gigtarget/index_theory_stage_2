@@ -82,6 +82,54 @@ def probe_has_audio_stream(media_path: Path) -> bool:
     return result.returncode == 0 and bool(result.stdout.strip())
 
 
+def probe_video_stream_info(media_path: Path) -> dict[str, float | int] | None:
+    cmd = [
+        "ffprobe",
+        "-v",
+        "error",
+        "-select_streams",
+        "v:0",
+        "-show_entries",
+        "stream=width,height,r_frame_rate",
+        "-of",
+        "default=nw=1:nk=1",
+        str(media_path),
+    ]
+    try:
+        result = subprocess.run(cmd, check=True, capture_output=True, text=True)
+    except subprocess.CalledProcessError as exc:  # pragma: no cover - surfaced to caller
+        logger.error(
+            "ffprobe failed to read video stream info. cmd=%s stderr=%s",
+            _format_command(cmd),
+            exc.stderr,
+        )
+        return None
+    lines = [line.strip() for line in result.stdout.splitlines() if line.strip()]
+    if len(lines) < 3:
+        return None
+    try:
+        width = int(lines[0])
+        height = int(lines[1])
+    except ValueError:
+        return None
+    fps_value = None
+    rate_parts = lines[2].split("/", 1)
+    try:
+        if len(rate_parts) == 2:
+            numerator = float(rate_parts[0])
+            denominator = float(rate_parts[1])
+            if denominator:
+                fps_value = numerator / denominator
+        else:
+            fps_value = float(lines[2])
+    except ValueError:
+        fps_value = None
+    info: dict[str, float | int] = {"width": width, "height": height}
+    if fps_value is not None:
+        info["fps"] = fps_value
+    return info
+
+
 def _format_duration(ms: int) -> str:
     total_seconds = max(ms, 0) // 1000
     minutes, seconds = divmod(total_seconds, 60)
@@ -224,7 +272,13 @@ async def run_ffmpeg_with_telegram_progress(
     if return_code != 0:
         failure_text = "❌ Render failed"
         if stderr_lines:
-            failure_text = f"{failure_text}\n" + "\n".join(stderr_lines)
+            stderr_text = "\n".join(stderr_lines)
+            failure_text = f"{failure_text}\n{stderr_text}"
+            logger.error(
+                "ffmpeg failed with code %s. stderr (tail): %s",
+                return_code,
+                stderr_text[-2000:],
+            )
         await bot.edit_message_text(
             chat_id=chat_id,
             message_id=status_message.message_id,
@@ -319,6 +373,15 @@ async def merge_videos_concat(
         concat_paths = [intro_path, *video_paths]
     else:
         concat_paths = list(video_paths)
+    target_width = 1920
+    target_height = 1080
+    reference_path = video_paths[0] if video_paths else None
+    if reference_path is not None:
+        reference_info = await asyncio.to_thread(probe_video_stream_info, reference_path)
+        if reference_info:
+            target_width = int(reference_info["width"])
+            target_height = int(reference_info["height"])
+    logger.info("concat target: %sx%s fps=30", target_width, target_height)
     durations: list[float] = []
     if concat_paths:
         for path in concat_paths:
@@ -331,15 +394,36 @@ async def merge_videos_concat(
         duration = durations[index]
         v_label = f"v{index}"
         a_label = f"a{index}"
-        filter_parts.append(f"[{index}:v:0]setpts=PTS-STARTPTS[{v_label}]")
-        has_audio = await asyncio.to_thread(probe_has_audio_stream, path)
-        logger.info(
-            "concat input %s: path=%s has_audio=%s dur=%.3f",
-            index,
-            path,
-            has_audio,
-            duration,
+        stream_info = await asyncio.to_thread(probe_video_stream_info, path)
+        filter_parts.append(
+            f"[{index}:v:0]"
+            f"scale={target_width}:{target_height}:force_original_aspect_ratio=decrease,"
+            f"pad={target_width}:{target_height}:(ow-iw)/2:(oh-ih)/2,"
+            "fps=30,format=yuv420p,setsar=1,setpts=PTS-STARTPTS"
+            f"[{v_label}]"
         )
+        has_audio = await asyncio.to_thread(probe_has_audio_stream, path)
+        if stream_info:
+            logger.info(
+                "concat input %s: path=%s size=%sx%s fps=%s has_audio=%s dur=%.3f",
+                index,
+                path,
+                stream_info["width"],
+                stream_info["height"],
+                f"{stream_info.get('fps', 'n/a'):.3f}"
+                if isinstance(stream_info.get("fps"), float)
+                else stream_info.get("fps", "n/a"),
+                has_audio,
+                duration,
+            )
+        else:
+            logger.info(
+                "concat input %s: path=%s has_audio=%s dur=%.3f",
+                index,
+                path,
+                has_audio,
+                duration,
+            )
         if has_audio:
             filter_parts.append(
                 f"[{index}:a:0]"
