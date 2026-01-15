@@ -294,13 +294,18 @@ async def merge_videos_concat(
         fps = int(os.environ.get("VIDEO_FPS", "30"))
     except ValueError:
         fps = 30
+    intro_path = Path(__file__).resolve().parents[1] / "material" / "intro_video.mp4"
+    if intro_path.exists():
+        concat_paths = [intro_path, *video_paths]
+    else:
+        concat_paths = list(video_paths)
     input_cmd: list[str] = []
-    for path in video_paths:
+    for path in concat_paths:
         input_cmd.extend(["-i", str(path)])
     filter_inputs = "".join(
-        f"[{index}:v:0][{index}:a:0]" for index in range(len(video_paths))
+        f"[{index}:v:0][{index}:a:0]" for index in range(len(concat_paths))
     )
-    filter_complex = f"{filter_inputs}concat=n={len(video_paths)}:v=1:a=1[v][a]"
+    filter_complex = f"{filter_inputs}concat=n={len(concat_paths)}:v=1:a=1[v][a]"
     cmd = [
         "ffmpeg",
         "-y",
@@ -324,8 +329,8 @@ async def merge_videos_concat(
         str(out_path),
     ]
     total_duration = 0.0
-    if video_paths:
-        for path in video_paths:
+    if concat_paths:
+        for path in concat_paths:
             total_duration += await asyncio.to_thread(probe_duration_seconds, path)
     total_duration_ms = int(total_duration * 1000) if total_duration else None
     await run_ffmpeg_with_telegram_progress(
