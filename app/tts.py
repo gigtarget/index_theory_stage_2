@@ -13,6 +13,7 @@ DEFAULT_VOICE_ID = "VbDz3QQGkAGePVWfkfwE"
 DEFAULT_MODEL_ID = "eleven_multilingual_v2"
 DEFAULT_OUTPUT_FORMAT = "mp3_44100_128"
 DEFAULT_USAGE_STATE_PATH = "/tmp/elevenlabs_usage.json"
+_KEYS_LOGGED = False
 
 
 def prepare_tts_payload(text: str, instructions: Optional[str]) -> str:
@@ -45,14 +46,32 @@ def _save_usage_state(state_path: Path, usage: dict[str, int]) -> None:
         logger.warning("Failed to persist ElevenLabs usage state: %s", exc)
 
 
+def _sanitize_key(raw: str) -> str:
+    return raw.strip().strip('"').strip("'").replace("\r", "").replace("\n", "")
+
+
 def _parse_api_keys() -> list[str]:
+    global _KEYS_LOGGED
     raw_keys = os.environ.get("ELEVENLABS_API_KEYS", "")
-    keys = [key.strip() for key in raw_keys.split(",") if key.strip()]
+    raw_single = os.environ.get("ELEVENLABS_API_KEY", "")
+    raw_entries = raw_keys.split(",") if raw_keys else ([raw_single] if raw_single else [])
+    keys = [_sanitize_key(key) for key in raw_entries]
+    keys = [key for key in keys if key]
+    raw_combined = ",".join(raw_entries)
+    has_whitespace = any(" " in entry for entry in raw_entries)
+    has_newlines = "\n" in raw_combined or "\r" in raw_combined
+    if raw_entries and (has_whitespace or has_newlines):
+        logger.warning("ELEVENLABS_API_KEYS contains whitespace/newlines; sanitized.")
+    if not keys:
+        single_key = _sanitize_key(raw_single)
+        if single_key:
+            keys = [single_key]
+    if keys and not _KEYS_LOGGED:
+        logger.info("ElevenLabs keys loaded: %s", [_mask_key(key) for key in keys])
+        logger.info("ElevenLabs key lengths: %s", [len(key) for key in keys])
+        _KEYS_LOGGED = True
     if keys:
         return keys
-    single_key = os.environ.get("ELEVENLABS_API_KEY", "").strip()
-    if single_key:
-        return [single_key]
     raise RuntimeError("ElevenLabs API keys not configured")
 
 
@@ -116,6 +135,20 @@ def _should_rotate_from_response(response: httpx.Response) -> bool:
     return any(token in body for token in tokens)
 
 
+def validate_key(api_key: str) -> bool:
+    headers = {"xi-api-key": api_key}
+    try:
+        response = httpx.get("https://api.elevenlabs.io/v1/user", headers=headers, timeout=10.0)
+    except httpx.RequestError as exc:
+        logger.warning("ElevenLabs key validation failed due to network error: %s", exc)
+        return False
+    if response.status_code == 200:
+        logger.info("ElevenLabs key validated ok.")
+        return True
+    logger.warning("ElevenLabs key validation failed with status %s.", response.status_code)
+    return False
+
+
 def _request_tts(
     *,
     api_key: str,
@@ -127,7 +160,8 @@ def _request_tts(
     url = f"https://api.elevenlabs.io/v1/text-to-speech/{voice_id}"
     headers = {
         "xi-api-key": api_key,
-        "accept": "audio/wav" if output_format.startswith("wav") else "audio/mpeg",
+        "Content-Type": "application/json",
+        "Accept": "audio/mpeg",
     }
     payload = {
         "text": text,
@@ -166,6 +200,7 @@ def synthesize_tts_to_file(
     last_error: Exception | None = None
 
     for index, api_key in enumerate(keys, start=1):
+        api_key = _sanitize_key(api_key)
         masked = _mask_key(api_key)
         used_chars = usage_state.get(api_key, 0)
         if max_chars is not None and used_chars + len(cleaned) > max_chars:
@@ -176,6 +211,8 @@ def synthesize_tts_to_file(
                 used_chars,
                 max_chars,
             )
+            continue
+        if not validate_key(api_key):
             continue
         try:
             response = _request_tts(
