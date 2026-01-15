@@ -273,6 +273,11 @@ async def _maybe_upload_to_youtube(
     if os.environ.get("YT_UPLOAD_ON_COMPLETE") != "1":
         logger.info("YT_UPLOAD_ON_COMPLETE not enabled; skipping YouTube upload.")
         return
+    logger.info(
+        "Preparing YouTube upload for chat_id=%s path=%s",
+        chat_id,
+        final_video_path,
+    )
     if decode_b64_secrets_to_tmp() is None:
         logger.warning("YouTube upload skipped due to missing credentials.")
         return
@@ -293,6 +298,13 @@ async def _maybe_upload_to_youtube(
         tags = [tag.strip() for tag in tags_env.split(",") if tag.strip()]
     category_id = os.environ.get("YT_CATEGORY", "22")
     publish_at = datetime.now(timezone.utc) + timedelta(minutes=delay_minutes)
+    logger.info(
+        "YouTube upload settings: delay_minutes=%s category_id=%s tags_count=%s publish_at=%s",
+        delay_minutes,
+        category_id,
+        len(tags),
+        publish_at.strftime("%Y-%m-%dT%H:%M:%SZ"),
+    )
 
     try:
         video_id = await asyncio.to_thread(
