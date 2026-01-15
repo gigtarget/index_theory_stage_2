@@ -108,11 +108,19 @@ def _get_tts_keep_files() -> bool:
 
 
 def _get_tts_model() -> str:
-    return os.environ.get("TTS_MODEL", "gpt-4o-mini-tts").strip() or "gpt-4o-mini-tts"
+    return (
+        os.environ.get("ELEVENLABS_MODEL_ID")
+        or os.environ.get("TTS_MODEL")
+        or "eleven_multilingual_v2"
+    ).strip() or "eleven_multilingual_v2"
 
 
 def _get_tts_voice() -> str:
-    return os.environ.get("TTS_VOICE", "cedar").strip() or "cedar"
+    return (
+        os.environ.get("ELEVENLABS_VOICE_ID")
+        or os.environ.get("TTS_VOICE")
+        or "VbDz3QQGkAGePVWfkfwE"
+    ).strip() or "VbDz3QQGkAGePVWfkfwE"
 
 
 def _get_tts_format() -> str:
@@ -199,8 +207,8 @@ def _format_tts_notification(
     response_format: str,
     speed: float,
 ) -> str:
-    model_line = f"OpenAI model: {model}"
-    voice_line = f"Voice: {voice} | Lang: n/a"
+    model_line = f"ElevenLabs model: {model}"
+    voice_line = f"Voice ID: {voice} | Lang: n/a"
     speed_line = f"Format: {response_format} | Speed: {speed}"
     return (
         "Generating TTS audio.\n"

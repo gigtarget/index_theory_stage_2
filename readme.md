@@ -19,6 +19,9 @@ Telegram polling worker that converts uploaded PDF reports into per-slide voiceo
 ```
 TELEGRAM_BOT_TOKEN="<telegram bot token>"
 OPENAI_API_KEY="<openai api key>"
+ELEVENLABS_API_KEYS="key1,key2,key3"
+ELEVENLABS_VOICE_ID="VbDz3QQGkAGePVWfkfwE"
+ELEVENLABS_MODEL_ID="eleven_multilingual_v2"
 MODEL_NAME="gpt-5.2"  # optional (falls back to OPENAI_MODEL or default)
 HINDI_DEVANAGARI="1"  # optional (set to 0 to skip normalization)
 VOICE_STYLE="formal"  # optional (youtube|formal)
@@ -57,6 +60,15 @@ After all slides are sent, the bot posts a separate "Viewer question" message.
 - `OPENER_PROB` (optional): probability for optional openers in YouTube mode (default `0.10`).
 - `BRIDGE_PROB` (optional): probability for optional topic bridges in YouTube mode (default `0.20`).
 - `HUMANIZE_FULL_SCRIPT` (optional): `1` to run a second-pass YouTube humanizer for the full script (default `1` in YouTube mode).
+- `ELEVENLABS_API_KEYS` (required for TTS): comma-separated ElevenLabs API keys; the app rotates keys on auth/rate/quota/network errors.
+- `ELEVENLABS_API_KEY` (optional): single ElevenLabs API key (used if `ELEVENLABS_API_KEYS` is unset).
+- `ELEVENLABS_VOICE_ID` (optional): ElevenLabs voice ID (default `VbDz3QQGkAGePVWfkfwE`).
+- `ELEVENLABS_MODEL_ID` (optional): ElevenLabs model ID (default `eleven_multilingual_v2`).
+- `ELEVENLABS_OUTPUT_FORMAT` (optional): ElevenLabs output format (default `mp3_44100_128`; app maps `mp3` to this).
+- `ELEVENLABS_MAX_CHARS_PER_KEY` (optional): rotate keys once usage would exceed this limit.
+- `ELEVENLABS_USAGE_STATE_PATH` (optional): path to persist per-key character usage (default `/tmp/elevenlabs_usage.json`).
+
+When TTS is enabled, the bot uses ElevenLabs for audio synthesis only. If a key returns 401/403, 429, 402, quota/limit errors, or a network timeout, the next key is tried automatically. The default TTS format is `mp3`; the ElevenLabs integration maps this to `mp3_44100_128` unless you override `ELEVENLABS_OUTPUT_FORMAT`.
 
 ### Recommended Railway settings for YouTube mode
 ```
