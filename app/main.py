@@ -36,7 +36,6 @@ from app.script_generator import (
     humanize_full_script,
 )
 from app.text_postprocess import format_allcaps_words
-from app.transliterate_devanagari import llm_transliterate_to_devanagari
 from app.tts import prepare_tts_payload, synthesize_tts_to_file
 from app.video_creator import VideoMergeError, create_slide_video, merge_videos_concat
 from app.youtube_uploader import (
@@ -112,18 +111,8 @@ def _get_tts_model() -> str:
     return os.environ.get("TTS_MODEL", "gpt-4o-mini-tts").strip() or "gpt-4o-mini-tts"
 
 
-def _get_tts_model_hi() -> str | None:
-    model = os.environ.get("OPENAI_TTS_MODEL_HI", "").strip()
-    return model or None
-
-
 def _get_tts_voice() -> str:
     return os.environ.get("TTS_VOICE", "cedar").strip() or "cedar"
-
-
-def _get_tts_voice_hi() -> str | None:
-    voice = os.environ.get("OPENAI_TTS_VOICE_HI", "").strip()
-    return voice or None
 
 
 def _get_tts_format() -> str:
@@ -135,10 +124,6 @@ def _get_tts_speed() -> float:
         return float(os.environ.get("TTS_SPEED", "1.0"))
     except ValueError:
         return 1.0
-
-
-def _get_tts_transliteration_model() -> str:
-    return os.environ.get("TTS_TRANSLITERATION_MODEL", "gpt-4o-mini").strip() or "gpt-4o-mini"
 
 
 def _get_enable_slide_videos() -> bool:
@@ -359,16 +344,11 @@ async def _generate_and_send_scripts(
         tts_keep_files = _get_tts_keep_files()
         tts_model = _get_tts_model()
         tts_voice = _get_tts_voice()
-        tts_model_hi = _get_tts_model_hi()
-        tts_voice_hi = _get_tts_voice_hi()
         tts_format = _get_tts_format()
         tts_speed = _get_tts_speed()
         tts_instructions = _get_tts_instructions()
-        tts_transliteration_model = _get_tts_transliteration_model()
-        tts_script_devanagari = True
         tts_dir = Path("artifacts") / "tts"
         tts_delay_seconds = 0.75
-        tts_transliteration_logged = False
         scripts: list[str] = []
         video_enabled = _get_enable_slide_videos()
         video_fps = _get_video_fps()
@@ -376,10 +356,6 @@ async def _generate_and_send_scripts(
         clip_paths: list[Path] = []
         if video_enabled and watermarked_images is None:
             logger.warning("Video generation enabled, but no watermarked images provided.")
-
-        if tts_script_devanagari:
-            tts_model = tts_model_hi or tts_model
-            tts_voice = tts_voice_hi or tts_voice
 
         if tts_enabled:
             await _send_message(
@@ -463,28 +439,6 @@ async def _generate_and_send_scripts(
                 tts_result = ""
                 try:
                     tts_input = script
-                    if tts_script_devanagari:
-                        transliterated = ""
-                        try:
-                            transliterated = await asyncio.to_thread(
-                                llm_transliterate_to_devanagari,
-                                script,
-                                client,
-                                tts_transliteration_model,
-                            )
-                        except Exception as exc:  # pragma: no cover - API fallback
-                            logger.warning(
-                                "Failed to transliterate TTS input to Devanagari: %s", exc
-                            )
-                        if transliterated.strip():
-                            tts_input = transliterated
-                            if not tts_transliteration_logged:
-                                logger.info("TTS input transliterated to Devanagari")
-                                tts_transliteration_logged = True
-                        elif script.strip():
-                            logger.warning(
-                                "Devanagari transliteration returned empty output; using original text."
-                            )
                     tts_payload = prepare_tts_payload(tts_input, tts_instructions)
                     if tts_payload:
                         await _send_tts_input_preview(
