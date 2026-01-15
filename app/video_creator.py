@@ -62,6 +62,34 @@ def probe_duration_seconds(media_path: Path) -> float:
         ) from exc
 
 
+def probe_has_audio_stream(media_path: Path) -> bool:
+    cmd = [
+        "ffprobe",
+        "-v",
+        "error",
+        "-select_streams",
+        "a",
+        "-show_entries",
+        "stream=index",
+        "-of",
+        "csv=p=0",
+        str(media_path),
+    ]
+    try:
+        result = subprocess.run(cmd, check=True, capture_output=True, text=True)
+    except subprocess.CalledProcessError as exc:  # pragma: no cover - surfaced to caller
+        command_text = _format_command(cmd)
+        logger.error(
+            "ffprobe failed to read audio streams. cmd=%s stderr=%s",
+            command_text,
+            exc.stderr,
+        )
+        raise RuntimeError(
+            f"ffprobe failed to read audio streams. cmd={command_text} stderr={exc.stderr}"
+        ) from exc
+    return bool(result.stdout.strip())
+
+
 def _format_duration(ms: int) -> str:
     total_seconds = max(ms, 0) // 1000
     minutes, seconds = divmod(total_seconds, 60)
@@ -299,13 +327,36 @@ async def merge_videos_concat(
         concat_paths = [intro_path, *video_paths]
     else:
         concat_paths = list(video_paths)
+    durations: list[float] = []
+    has_audio: list[bool] = []
+    if concat_paths:
+        for path in concat_paths:
+            durations.append(await asyncio.to_thread(probe_duration_seconds, path))
+            has_audio.append(await asyncio.to_thread(probe_has_audio_stream, path))
     input_cmd: list[str] = []
     for path in concat_paths:
         input_cmd.extend(["-i", str(path)])
+    filter_parts: list[str] = []
+    for index in range(len(concat_paths)):
+        filter_parts.append(f"[{index}:v:0]setpts=PTS-STARTPTS[v{index}]")
+        if has_audio[index]:
+            filter_parts.append(
+                f"[{index}:a:0]"
+                "aformat=sample_rates=48000:channel_layouts=stereo,"
+                f"asetpts=PTS-STARTPTS[a{index}]"
+            )
+        else:
+            filter_parts.append(
+                "anullsrc=channel_layout=stereo:sample_rate=48000,"
+                f"atrim=0:{durations[index]:.3f},asetpts=PTS-STARTPTS[a{index}]"
+            )
     filter_inputs = "".join(
-        f"[{index}:v:0][{index}:a:0]" for index in range(len(concat_paths))
+        f"[v{index}][a{index}]" for index in range(len(concat_paths))
     )
-    filter_complex = f"{filter_inputs}concat=n={len(concat_paths)}:v=1:a=1[v][a]"
+    filter_parts.append(
+        f"{filter_inputs}concat=n={len(concat_paths)}:v=1:a=1[v][a]"
+    )
+    filter_complex = ";".join(filter_parts)
     cmd = [
         "ffmpeg",
         "-y",
@@ -328,10 +379,7 @@ async def merge_videos_concat(
         "+faststart",
         str(out_path),
     ]
-    total_duration = 0.0
-    if concat_paths:
-        for path in concat_paths:
-            total_duration += await asyncio.to_thread(probe_duration_seconds, path)
+    total_duration = sum(durations)
     total_duration_ms = int(total_duration * 1000) if total_duration else None
     await run_ffmpeg_with_telegram_progress(
         cmd,
