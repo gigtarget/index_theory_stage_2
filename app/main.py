@@ -159,6 +159,37 @@ def _get_tts_instructions() -> str | None:
     return instructions or None
 
 
+def _get_video_message_filter() -> filters.MessageFilter:
+    video_filter = filters.VIDEO
+    document_video_filter = getattr(filters.Document, "VIDEO", None)
+    if document_video_filter is not None:
+        return video_filter | document_video_filter
+
+    mime_filter = getattr(filters.Document, "MimeType", None)
+    if mime_filter is None:
+        return video_filter
+
+    video_mime_types = [
+        "video/mp4",
+        "video/quicktime",
+        "video/x-matroska",
+        "video/webm",
+        "video/avi",
+        "video/mpeg",
+        "video/3gpp",
+        "video/3gpp2",
+        "video/x-msvideo",
+    ]
+    document_filter = None
+    for mime_type in video_mime_types:
+        current_filter = mime_filter(mime_type)
+        document_filter = (
+            current_filter if document_filter is None else document_filter | current_filter
+        )
+    if document_filter is None:
+        return video_filter
+    return video_filter | document_filter
+
 
 
 def _format_tts_notification(
@@ -280,6 +311,99 @@ async def _maybe_upload_to_youtube(
             chat_id,
             f"YouTube upload failed: {exc}",
         )
+        return
+
+    publish_time = publish_at.strftime("%Y-%m-%dT%H:%M:%SZ")
+    await _send_message(
+        context,
+        chat_id,
+        "YouTube upload scheduled.\n"
+        f"Video ID: {video_id}\n"
+        f"Publish time (UTC): {publish_time}",
+    )
+
+
+async def _process_video(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    message = update.effective_message
+    chat_id = update.effective_chat.id if update.effective_chat else None
+    if not message or chat_id is None:
+        logger.info("Received video handler call without message or chat_id.")
+        return
+
+    video = message.video
+    document = message.document
+    file_id = None
+    filename = None
+    if video is not None:
+        file_id = video.file_id
+        filename = video.file_name
+    elif document is not None:
+        file_id = document.file_id
+        filename = document.file_name
+
+    if not file_id:
+        logger.info("Video handler invoked without video file_id.")
+        return
+
+    safe_name = Path(filename or "video.mp4").name
+    incoming_dir = Path("artifacts") / "incoming"
+    incoming_dir.mkdir(parents=True, exist_ok=True)
+    incoming_path = incoming_dir / f"{uuid.uuid4().hex}_{safe_name}"
+
+    try:
+        await _send_message(context, chat_id, "Downloading video...")
+        file = await context.bot.get_file(file_id)
+        video_bytes = await file.download_as_bytearray()
+        incoming_path.write_bytes(bytes(video_bytes))
+        logger.info(
+            "Saved incoming video for chat_id=%s to %s", chat_id, incoming_path
+        )
+    except Exception as exc:  # pragma: no cover - logged for robustness
+        logger.exception("Failed to download video for chat_id=%s: %s", chat_id, exc)
+        await _send_message(context, chat_id, f"Error downloading video: {exc}")
+        return
+
+    if decode_b64_secrets_to_tmp() is None:
+        await _send_message(
+            context,
+            chat_id,
+            "YouTube credentials are missing. Please configure them and try again.",
+        )
+        return
+
+    delay_raw = os.environ.get("YT_SCHEDULE_DELAY_MINUTES", "60")
+    try:
+        delay_minutes = int(delay_raw)
+    except ValueError:
+        logger.warning(
+            "Invalid YT_SCHEDULE_DELAY_MINUTES=%s, defaulting to 60.", delay_raw
+        )
+        delay_minutes = 60
+
+    report_date = message.date if message else None
+    date_str = _format_report_date(report_date)
+    title = f"Post Market Report {date_str} | Jatin Dhiman | Nifty 50 | Bank Nifty"
+    description = build_description(date_str)
+    tags_env = os.environ.get("YT_KEYWORDS")
+    tags = DEFAULT_TAGS
+    if tags_env:
+        tags = [tag.strip() for tag in tags_env.split(",") if tag.strip()]
+    category_id = os.environ.get("YT_CATEGORY", "22")
+    publish_at = datetime.now(timezone.utc) + timedelta(minutes=delay_minutes)
+
+    try:
+        video_id = await asyncio.to_thread(
+            upload_video,
+            str(incoming_path),
+            title,
+            description,
+            tags,
+            category_id,
+            publish_at,
+        )
+    except Exception as exc:
+        logger.exception("YouTube upload failed for chat_id=%s: %s", chat_id, exc)
+        await _send_message(context, chat_id, f"YouTube upload failed: {exc}")
         return
 
     publish_time = publish_at.strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -684,6 +808,10 @@ async def _handle_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     asyncio.create_task(_process_pdf(update, context))
 
 
+async def _handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    asyncio.create_task(_process_video(update, context))
+
+
 def _build_application() -> Application:
     bot_token = os.environ.get("TELEGRAM_BOT_TOKEN")
     if not bot_token:
@@ -692,6 +820,7 @@ def _build_application() -> Application:
     application = ApplicationBuilder().token(bot_token).build()
     application.add_error_handler(_handle_error)
     application.add_handler(CommandHandler("start", _handle_start))
+    application.add_handler(MessageHandler(_get_video_message_filter(), _handle_video))
     application.add_handler(MessageHandler(filters.Document.PDF, _handle_pdf))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, _handle_text))
     return application
