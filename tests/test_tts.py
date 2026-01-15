@@ -1,3 +1,4 @@
+import json
 import sys
 from pathlib import Path
 
@@ -11,49 +12,32 @@ from app import tts
 
 
 class _FakeResponse:
-    def __init__(self, recorder: dict):
-        self._recorder = recorder
+    def __init__(
+        self,
+        *,
+        status_code: int,
+        headers: dict[str, str] | None = None,
+        content: bytes = b"audio",
+        text: str = "",
+        json_data: dict | None = None,
+    ):
+        self.status_code = status_code
+        self.headers = headers or {}
+        self.content = content
+        self.text = text
+        self._json_data = json_data
 
-    def __enter__(self):
-        return self
-
-    def __exit__(self, exc_type, exc, tb):
-        return False
-
-    def stream_to_file(self, path: Path) -> None:
-        path.write_text("audio", encoding="utf-8")
-        self._recorder["streamed_to"] = str(path)
-
-
-class _FakeStreaming:
-    def __init__(self, recorder: dict):
-        self._recorder = recorder
-
-    def create(self, **kwargs):
-        self._recorder["kwargs"] = kwargs
-        return _FakeResponse(self._recorder)
-
-
-class _FakeSpeech:
-    def __init__(self, recorder: dict):
-        self.with_streaming_response = _FakeStreaming(recorder)
-
-
-class _FakeAudio:
-    def __init__(self, recorder: dict):
-        self.speech = _FakeSpeech(recorder)
-
-
-class _FakeClient:
-    def __init__(self, recorder: dict):
-        self.audio = _FakeAudio(recorder)
+    def json(self) -> dict:
+        if self._json_data is None:
+            raise ValueError("No JSON")
+        return self._json_data
 
 
 def test_synthesize_tts_skips_empty(monkeypatch, tmp_path):
-    def _fail_build_client():
-        raise AssertionError("OpenAI client should not be constructed for empty text")
+    def _fail_post(*args, **kwargs):
+        raise AssertionError("HTTP call should not be made for empty text")
 
-    monkeypatch.setattr(tts, "_build_client", _fail_build_client)
+    monkeypatch.setattr(tts.httpx, "post", _fail_post)
 
     result = tts.synthesize_tts_to_file(
         "   ",
@@ -70,12 +54,53 @@ def test_synthesize_tts_skips_empty(monkeypatch, tmp_path):
 def test_synthesize_tts_truncates_long_text(monkeypatch, tmp_path):
     recorder: dict = {}
 
-    monkeypatch.setattr(tts, "_build_client", lambda: _FakeClient(recorder))
+    def _fake_post(url, headers, json, timeout):
+        recorder["payload"] = json
+        return _FakeResponse(
+            status_code=200,
+            headers={"x-character-count": str(len(json["text"]))},
+            content=b"audio",
+        )
+
+    monkeypatch.setattr(tts.httpx, "post", _fake_post)
+    monkeypatch.setenv("ELEVENLABS_API_KEY", "key-1")
 
     long_text = "a" * (tts.MAX_TTS_CHARS + 200)
     output_path = tmp_path / "out.mp3"
     result = tts.synthesize_tts_to_file(
         long_text,
+        str(output_path),
+        model="",
+        voice="",
+        response_format="mp3",
+        speed=1.0,
+        instructions=None,
+    )
+
+    assert result == str(output_path)
+    assert output_path.exists()
+    assert len(recorder["payload"]["text"]) == tts.MAX_TTS_CHARS
+
+
+def test_synthesize_tts_rotates_keys(monkeypatch, tmp_path):
+    used_keys: list[str] = []
+
+    def _fake_post(url, headers, json, timeout):
+        used_keys.append(headers["xi-api-key"])
+        if headers["xi-api-key"] == "key-1":
+            return _FakeResponse(status_code=401, text="unauthorized")
+        return _FakeResponse(
+            status_code=200,
+            headers={"x-character-count": "12"},
+            content=b"audio",
+        )
+
+    monkeypatch.setattr(tts.httpx, "post", _fake_post)
+    monkeypatch.setenv("ELEVENLABS_API_KEYS", "key-1,key-2")
+
+    output_path = tmp_path / "out.mp3"
+    result = tts.synthesize_tts_to_file(
+        "hello",
         str(output_path),
         model="model",
         voice="voice",
@@ -85,6 +110,35 @@ def test_synthesize_tts_truncates_long_text(monkeypatch, tmp_path):
     )
 
     assert result == str(output_path)
-    assert output_path.exists()
-    assert len(recorder["kwargs"]["input"]) == tts.MAX_TTS_CHARS
+    assert output_path.read_bytes() == b"audio"
+    assert used_keys == ["key-1", "key-2"]
 
+
+def test_synthesize_tts_usage_tracking(monkeypatch, tmp_path):
+    state_path = tmp_path / "usage.json"
+
+    def _fake_post(url, headers, json, timeout):
+        return _FakeResponse(
+            status_code=200,
+            headers={"x-character-count": "15", "request-id": "req-123"},
+            content=b"audio",
+        )
+
+    monkeypatch.setattr(tts.httpx, "post", _fake_post)
+    monkeypatch.setenv("ELEVENLABS_API_KEY", "key-usage")
+    monkeypatch.setenv("ELEVENLABS_USAGE_STATE_PATH", str(state_path))
+
+    output_path = tmp_path / "out.mp3"
+    result = tts.synthesize_tts_to_file(
+        "hello",
+        str(output_path),
+        model="model",
+        voice="voice",
+        response_format="mp3",
+        speed=1.0,
+        instructions=None,
+    )
+
+    assert result == str(output_path)
+    usage = json.loads(state_path.read_text(encoding="utf-8"))
+    assert usage["key-usage"] == 15
