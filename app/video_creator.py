@@ -1,8 +1,13 @@
+import asyncio
 import logging
 import os
 import shlex
 import subprocess
+import time
+from collections import deque
 from pathlib import Path
+
+from telegram import Bot
 
 logger = logging.getLogger(__name__)
 
@@ -57,18 +62,178 @@ def probe_duration_seconds(media_path: Path) -> float:
         ) from exc
 
 
-def create_slide_video(
+def _format_duration(ms: int) -> str:
+    total_seconds = max(ms, 0) // 1000
+    minutes, seconds = divmod(total_seconds, 60)
+    hours, minutes = divmod(minutes, 60)
+    if hours:
+        return f"{hours:d}:{minutes:02d}:{seconds:02d}"
+    return f"{minutes:02d}:{seconds:02d}"
+
+
+def _build_ffmpeg_command(cmd: list[str]) -> list[str]:
+    if not cmd or cmd[0] != "ffmpeg":
+        raise ValueError("ffmpeg command must start with 'ffmpeg'")
+    return [
+        cmd[0],
+        "-hide_banner",
+        "-nostats",
+        "-loglevel",
+        "error",
+        "-progress",
+        "pipe:1",
+        *cmd[1:],
+    ]
+
+
+def _format_progress_message(
+    *,
+    title: str,
+    out_time_ms: int,
+    total_duration_ms: int | None,
+    speed: str | None,
+) -> str:
+    time_str = _format_duration(out_time_ms)
+    speed_str = speed or "n/a"
+    if total_duration_ms:
+        total_str = _format_duration(total_duration_ms)
+        percent = min(100, int(out_time_ms / total_duration_ms * 100))
+        return f"🎬 {title}: {percent}% ({time_str} / {total_str}) speed {speed_str}"
+    return f"🎬 {title}: {time_str} speed {speed_str}"
+
+
+async def _read_stderr(
+    stream: asyncio.StreamReader, *, max_lines: int = 40, max_bytes: int = 4096
+) -> deque[str]:
+    lines: deque[str] = deque()
+    total_bytes = 0
+    while True:
+        chunk = await stream.readline()
+        if not chunk:
+            break
+        text = chunk.decode(errors="replace").rstrip()
+        if not text:
+            continue
+        lines.append(text)
+        total_bytes += len(text.encode())
+        while len(lines) > max_lines or total_bytes > max_bytes:
+            removed = lines.popleft()
+            total_bytes -= len(removed.encode())
+    return lines
+
+
+async def run_ffmpeg_with_telegram_progress(
+    cmd: list[str],
+    chat_id: int,
+    bot: Bot,
+    title: str,
+    total_duration_ms: int | None,
+    throttle_seconds: int = 3,
+) -> None:
+    full_cmd = _build_ffmpeg_command(cmd)
+    initial_message = _format_progress_message(
+        title=title,
+        out_time_ms=0,
+        total_duration_ms=total_duration_ms,
+        speed="1.0x",
+    )
+    status_message = await bot.send_message(chat_id=chat_id, text=initial_message)
+    last_edit = time.monotonic()
+    last_text = initial_message
+    process = await asyncio.create_subprocess_exec(
+        *full_cmd,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    assert process.stdout is not None
+    assert process.stderr is not None
+    stderr_task = asyncio.create_task(_read_stderr(process.stderr))
+    out_time_ms = 0
+    speed = None
+    try:
+        while True:
+            line = await process.stdout.readline()
+            if not line:
+                break
+            text = line.decode(errors="replace").strip()
+            if not text or "=" not in text:
+                continue
+            key, value = text.split("=", 1)
+            if key == "out_time_ms":
+                try:
+                    out_time_ms = int(value)
+                except ValueError:
+                    continue
+            elif key == "speed":
+                speed = value
+            elif key == "progress" and value == "end":
+                out_time_ms = total_duration_ms or out_time_ms
+            now = time.monotonic()
+            if now - last_edit < throttle_seconds:
+                continue
+            progress_text = _format_progress_message(
+                title=title,
+                out_time_ms=out_time_ms,
+                total_duration_ms=total_duration_ms,
+                speed=speed,
+            )
+            if progress_text != last_text:
+                await bot.edit_message_text(
+                    chat_id=chat_id,
+                    message_id=status_message.message_id,
+                    text=progress_text,
+                )
+                last_text = progress_text
+                last_edit = now
+        return_code = await process.wait()
+        stderr_lines = await stderr_task
+    except Exception:
+        process.kill()
+        await process.wait()
+        stderr_lines = await stderr_task
+        failure_text = "❌ Render failed"
+        if stderr_lines:
+            failure_text = f"{failure_text}\n" + "\n".join(stderr_lines)
+        await bot.edit_message_text(
+            chat_id=chat_id,
+            message_id=status_message.message_id,
+            text=failure_text,
+        )
+        raise
+
+    if return_code != 0:
+        failure_text = "❌ Render failed"
+        if stderr_lines:
+            failure_text = f"{failure_text}\n" + "\n".join(stderr_lines)
+        await bot.edit_message_text(
+            chat_id=chat_id,
+            message_id=status_message.message_id,
+            text=failure_text,
+        )
+        raise RuntimeError(f"ffmpeg exited with code {return_code}. cmd={_format_command(cmd)}")
+
+    await bot.edit_message_text(
+        chat_id=chat_id,
+        message_id=status_message.message_id,
+        text="✅ Render complete",
+    )
+
+
+async def create_slide_video(
     *,
     image_bytes: bytes,
     audio_path: Path,
     out_path: Path,
+    chat_id: int,
+    bot: Bot,
     fps: int = 30,
 ) -> None:
     ensure_dir(out_path.parent)
     image_path = out_path.with_suffix(".png")
     write_bytes(image_path, image_bytes)
-    duration = probe_duration_seconds(audio_path)
+    duration = await asyncio.to_thread(probe_duration_seconds, audio_path)
     target = duration + 0.05
+    total_duration_ms = int(duration * 1000)
     cmd = [
         "ffmpeg",
         "-y",
@@ -102,17 +267,13 @@ def create_slide_video(
         str(out_path),
     ]
     try:
-        subprocess.run(cmd, check=True, capture_output=True, text=True)
-    except subprocess.CalledProcessError as exc:  # pragma: no cover - surfaced to caller
-        command_text = _format_command(cmd)
-        logger.error(
-            "ffmpeg failed to create slide video. cmd=%s stderr=%s",
-            command_text,
-            exc.stderr,
+        await run_ffmpeg_with_telegram_progress(
+            cmd,
+            chat_id,
+            bot,
+            "Rendering",
+            total_duration_ms,
         )
-        raise RuntimeError(
-            f"ffmpeg failed to create slide video. cmd={command_text} stderr={exc.stderr}"
-        ) from exc
     finally:
         try:
             if image_path.exists():
@@ -121,7 +282,13 @@ def create_slide_video(
             logger.exception("Failed to remove temp image at %s", image_path)
 
 
-def merge_videos_concat(video_paths: list[Path], out_path: Path) -> None:
+async def merge_videos_concat(
+    video_paths: list[Path],
+    out_path: Path,
+    *,
+    chat_id: int,
+    bot: Bot,
+) -> None:
     ensure_dir(out_path.parent)
     try:
         fps = int(os.environ.get("VIDEO_FPS", "30"))
@@ -156,15 +323,15 @@ def merge_videos_concat(video_paths: list[Path], out_path: Path) -> None:
         "+faststart",
         str(out_path),
     ]
-    try:
-        subprocess.run(cmd, check=True, capture_output=True, text=True)
-    except subprocess.CalledProcessError as exc:  # pragma: no cover
-        command_text = _format_command(cmd)
-        logger.error(
-            "ffmpeg concat filter failed. cmd=%s stderr=%s",
-            command_text,
-            exc.stderr,
-        )
-        raise RuntimeError(
-            f"ffmpeg failed to merge videos. cmd={command_text} stderr={exc.stderr}"
-        ) from exc
+    total_duration = 0.0
+    if video_paths:
+        for path in video_paths:
+            total_duration += await asyncio.to_thread(probe_duration_seconds, path)
+    total_duration_ms = int(total_duration * 1000) if total_duration else None
+    await run_ffmpeg_with_telegram_progress(
+        cmd,
+        chat_id,
+        bot,
+        "Concatenating",
+        total_duration_ms,
+    )

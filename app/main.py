@@ -529,11 +529,12 @@ async def _generate_and_send_scripts(
                                 f"Creating video clip {index}/{total_slides}...",
                             )
                             clip_path = videos_dir / f"clip_{index:02d}.mp4"
-                            await asyncio.to_thread(
-                                create_slide_video,
+                            await create_slide_video(
                                 image_bytes=watermarked_images[index - 1],
                                 audio_path=audio_path,
                                 out_path=clip_path,
+                                chat_id=chat_id,
+                                bot=context.bot,
                                 fps=video_fps,
                             )
                             clip_paths.append(clip_path)
@@ -563,7 +564,12 @@ async def _generate_and_send_scripts(
             job_root = scripts_dir.parent.parent
             videos_dir = job_root / "videos"
             merged_path = videos_dir / "final.mp4"
-            await asyncio.to_thread(merge_videos_concat, clip_paths, merged_path)
+            await merge_videos_concat(
+                clip_paths,
+                merged_path,
+                chat_id=chat_id,
+                bot=context.bot,
+            )
             with open(merged_path, "rb") as merged_file:
                 await context.bot.send_document(
                     chat_id=chat_id,
