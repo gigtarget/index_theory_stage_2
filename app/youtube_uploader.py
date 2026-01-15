@@ -32,6 +32,33 @@ DEFAULT_TAGS = [
 
 
 def decode_b64_secrets_to_tmp() -> Optional[tuple[Path, Path]]:
+    client_json = os.environ.get("YOUTUBE_CLIENT_SECRETS_JSON")
+    token_json = os.environ.get("YOUTUBE_TOKEN_JSON")
+
+    tmp_dir = Path("/tmp/yt")
+    tmp_dir.mkdir(parents=True, exist_ok=True)
+    client_path = tmp_dir / "client_secrets.json"
+    token_path = tmp_dir / "token.json"
+
+    if client_json and token_json:
+        logger.info(
+            "YouTube JSON secrets provided. client_len=%s token_len=%s",
+            len(client_json),
+            len(token_json),
+        )
+        try:
+            client_path.write_text(client_json, encoding="utf-8")
+            token_path.write_text(token_json, encoding="utf-8")
+        except OSError as exc:
+            logger.warning("Failed to write YouTube JSON secrets: %s", exc)
+            return None
+        logger.info(
+            "Wrote YouTube secrets to %s and %s",
+            client_path,
+            token_path,
+        )
+        return client_path, token_path
+
     client_b64 = os.environ.get("YT_CLIENT_SECRETS_B64")
     token_b64 = os.environ.get("YT_TOKEN_B64")
 
@@ -45,11 +72,6 @@ def decode_b64_secrets_to_tmp() -> Optional[tuple[Path, Path]]:
         len(client_b64),
         len(token_b64),
     )
-
-    tmp_dir = Path("/tmp/yt")
-    tmp_dir.mkdir(parents=True, exist_ok=True)
-    client_path = tmp_dir / "client_secrets.json"
-    token_path = tmp_dir / "token.json"
 
     try:
         client_path.write_bytes(base64.b64decode(client_b64))
@@ -66,6 +88,27 @@ def decode_b64_secrets_to_tmp() -> Optional[tuple[Path, Path]]:
     return client_path, token_path
 
 
+def _load_token_payload(token_path: Path) -> dict:
+    token_payload = json.loads(token_path.read_text(encoding="utf-8"))
+    if not isinstance(token_payload, dict):
+        raise RuntimeError(
+            "YOUTUBE_TOKEN_JSON is not an authorized_user token; it looks like client "
+            "secrets. Token must include refresh_token/client_id/client_secret."
+        )
+    if "installed" in token_payload or "web" in token_payload:
+        raise RuntimeError(
+            "YOUTUBE_TOKEN_JSON is not an authorized_user token; it looks like client "
+            "secrets. Token must include refresh_token/client_id/client_secret."
+        )
+    required_fields = ("refresh_token", "client_id", "client_secret")
+    missing = [field for field in required_fields if not token_payload.get(field)]
+    if missing:
+        raise RuntimeError(
+            "YOUTUBE_TOKEN_JSON is missing required fields: %s." % ", ".join(missing)
+        )
+    return token_payload
+
+
 def build_youtube_client() -> Optional[object]:
     decoded = decode_b64_secrets_to_tmp()
     if not decoded:
@@ -74,10 +117,11 @@ def build_youtube_client() -> Optional[object]:
     _, token_path = decoded
     logger.info("Loading YouTube token from %s", token_path)
     try:
-        credentials = Credentials.from_authorized_user_file(
-            str(token_path), scopes=UPLOAD_SCOPES
+        token_payload = _load_token_payload(token_path)
+        credentials = Credentials.from_authorized_user_info(
+            token_payload, scopes=UPLOAD_SCOPES
         )
-    except (ValueError, OSError, json.JSONDecodeError) as exc:
+    except (ValueError, OSError, json.JSONDecodeError, RuntimeError) as exc:
         logger.warning("Failed to load YouTube token: %s", exc)
         return None
 
