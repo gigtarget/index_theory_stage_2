@@ -51,6 +51,7 @@ logging.getLogger("httpx").setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
 
 DEFAULT_MODEL_NAME = "gpt-5.2"
+PENDING_UPLOAD_KEY = "pending_youtube_upload"
 
 
 def _get_model_name() -> str:
@@ -272,23 +273,9 @@ def _format_report_date(report_date: datetime | None) -> str:
     return local_date.strftime("%d %b %Y")
 
 
-async def _maybe_upload_to_youtube(
-    context: ContextTypes.DEFAULT_TYPE,
-    chat_id: int,
-    final_video_path: Path,
-    report_date: datetime | None,
-) -> None:
-    if os.environ.get("YT_UPLOAD_ON_COMPLETE") != "1":
-        logger.info("YT_UPLOAD_ON_COMPLETE not enabled; skipping YouTube upload.")
-        return
-    logger.info(
-        "Preparing YouTube upload for chat_id=%s path=%s",
-        chat_id,
-        final_video_path,
-    )
-    if decode_b64_secrets_to_tmp() is None:
-        logger.warning("YouTube upload skipped due to missing credentials.")
-        return
+def _build_youtube_upload_payload(
+    final_video_path: Path, report_date: datetime | None
+) -> dict[str, object]:
     delay_raw = os.environ.get("YT_SCHEDULE_DELAY_MINUTES", "60")
     try:
         delay_minutes = int(delay_raw)
@@ -306,22 +293,95 @@ async def _maybe_upload_to_youtube(
         tags = [tag.strip() for tag in tags_env.split(",") if tag.strip()]
     category_id = os.environ.get("YT_CATEGORY", "22")
     publish_at = datetime.now(timezone.utc) + timedelta(minutes=delay_minutes)
+    return {
+        "video_path": str(final_video_path),
+        "title": title,
+        "description": description,
+        "tags": tags,
+        "category_id": category_id,
+        "publish_at": publish_at.isoformat(),
+        "delay_minutes": delay_minutes,
+    }
+
+
+async def _queue_youtube_upload_confirmation(
+    context: ContextTypes.DEFAULT_TYPE, chat_id: int, payload: dict[str, object]
+) -> None:
+    publish_at = datetime.fromisoformat(str(payload["publish_at"]))
     logger.info(
         "YouTube upload settings: delay_minutes=%s category_id=%s tags_count=%s publish_at=%s",
-        delay_minutes,
-        category_id,
-        len(tags),
+        payload["delay_minutes"],
+        payload["category_id"],
+        len(payload["tags"]),
         publish_at.strftime("%Y-%m-%dT%H:%M:%SZ"),
     )
+    context.chat_data[PENDING_UPLOAD_KEY] = payload
+    await _send_message(
+        context,
+        chat_id,
+        "YouTube upload is ready. Reply with /upload_yes to proceed or /upload_no to cancel.\n"
+        f"Title: {payload['title']}\n"
+        f"Scheduled publish time (UTC): {publish_at.strftime('%Y-%m-%dT%H:%M:%SZ')}",
+    )
 
+
+async def _maybe_upload_to_youtube(
+    context: ContextTypes.DEFAULT_TYPE,
+    chat_id: int,
+    final_video_path: Path,
+    report_date: datetime | None,
+) -> None:
+    if os.environ.get("YT_UPLOAD_ON_COMPLETE") != "1":
+        logger.info("YT_UPLOAD_ON_COMPLETE not enabled; skipping YouTube upload.")
+        return
+    logger.info(
+        "Preparing YouTube upload for chat_id=%s path=%s",
+        chat_id,
+        final_video_path,
+    )
+    if decode_b64_secrets_to_tmp() is None:
+        logger.warning("YouTube upload skipped due to missing credentials.")
+        return
+    payload = _build_youtube_upload_payload(final_video_path, report_date)
+    await _queue_youtube_upload_confirmation(context, chat_id, payload)
+
+
+async def _perform_youtube_upload(
+    context: ContextTypes.DEFAULT_TYPE, chat_id: int, payload: dict[str, object]
+) -> bool:
+    if os.environ.get("YT_UPLOAD_ON_COMPLETE") != "1":
+        await _send_message(
+            context,
+            chat_id,
+            "YouTube upload is disabled. Set YT_UPLOAD_ON_COMPLETE=1 to enable uploads.",
+        )
+        return False
+    if decode_b64_secrets_to_tmp() is None:
+        await _send_message(
+            context,
+            chat_id,
+            "YouTube upload skipped due to missing credentials.",
+        )
+        return False
+
+    video_path = Path(str(payload["video_path"]))
+    if not video_path.exists():
+        await _send_message(
+            context,
+            chat_id,
+            "The final video file is missing. Please regenerate the video before uploading.",
+        )
+        return False
+
+    publish_at = datetime.fromisoformat(str(payload["publish_at"]))
     try:
         video_id = await asyncio.to_thread(
             upload_video,
-            str(final_video_path),
-            title,
-            description,
-            tags,
-            category_id,
+            str(video_path),
+            str(payload["title"]),
+            str(payload["description"]),
+            list(payload["tags"]),
+            str(payload["category_id"]),
             publish_at,
         )
     except Exception as exc:
@@ -331,7 +391,7 @@ async def _maybe_upload_to_youtube(
             chat_id,
             f"YouTube upload failed: {exc}",
         )
-        return
+        return False
 
     publish_time = publish_at.strftime("%Y-%m-%dT%H:%M:%SZ")
     await _send_message(
@@ -341,6 +401,34 @@ async def _maybe_upload_to_youtube(
         f"Video ID: {video_id}\n"
         f"Publish time (UTC): {publish_time}",
     )
+    return True
+
+
+async def _process_upload_confirmation(
+    context: ContextTypes.DEFAULT_TYPE, chat_id: int, approved: bool
+) -> None:
+    payload = context.chat_data.get(PENDING_UPLOAD_KEY)
+    if not payload:
+        await _send_message(context, chat_id, "No pending YouTube upload to confirm.")
+        return
+    if not approved:
+        context.chat_data.pop(PENDING_UPLOAD_KEY, None)
+        await _send_message(context, chat_id, "Okay, the YouTube upload was canceled.")
+        return
+    if payload.get("in_progress"):
+        await _send_message(context, chat_id, "Upload is already in progress.")
+        return
+    payload["in_progress"] = True
+    success = await _perform_youtube_upload(context, chat_id, payload)
+    if success:
+        context.chat_data.pop(PENDING_UPLOAD_KEY, None)
+    else:
+        payload["in_progress"] = False
+        await _send_message(
+            context,
+            chat_id,
+            "You can retry the upload by sending /upload_yes.",
+        )
 
 
 async def _process_video(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -391,49 +479,9 @@ async def _process_video(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         )
         return
 
-    delay_raw = os.environ.get("YT_SCHEDULE_DELAY_MINUTES", "60")
-    try:
-        delay_minutes = int(delay_raw)
-    except ValueError:
-        logger.warning(
-            "Invalid YT_SCHEDULE_DELAY_MINUTES=%s, defaulting to 60.", delay_raw
-        )
-        delay_minutes = 60
-
     report_date = message.date if message else None
-    date_str = _format_report_date(report_date)
-    title = f"Post Market Report {date_str} | Jatin Dhiman | Nifty 50 | Bank Nifty"
-    description = build_description(date_str)
-    tags_env = os.environ.get("YT_KEYWORDS")
-    tags = DEFAULT_TAGS
-    if tags_env:
-        tags = [tag.strip() for tag in tags_env.split(",") if tag.strip()]
-    category_id = os.environ.get("YT_CATEGORY", "22")
-    publish_at = datetime.now(timezone.utc) + timedelta(minutes=delay_minutes)
-
-    try:
-        video_id = await asyncio.to_thread(
-            upload_video,
-            str(incoming_path),
-            title,
-            description,
-            tags,
-            category_id,
-            publish_at,
-        )
-    except Exception as exc:
-        logger.exception("YouTube upload failed for chat_id=%s: %s", chat_id, exc)
-        await _send_message(context, chat_id, f"YouTube upload failed: {exc}")
-        return
-
-    publish_time = publish_at.strftime("%Y-%m-%dT%H:%M:%SZ")
-    await _send_message(
-        context,
-        chat_id,
-        "YouTube upload scheduled.\n"
-        f"Video ID: {video_id}\n"
-        f"Publish time (UTC): {publish_time}",
-    )
+    payload = _build_youtube_upload_payload(incoming_path, report_date)
+    await _queue_youtube_upload_confirmation(context, chat_id, payload)
 
 
 async def _send_tts_input_preview(
@@ -813,13 +861,34 @@ async def _handle_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     await _send_message(
         context,
         chat_id,
-        "Send me a PDF report. I'll split each page and reply with one slide script per message.",
+        "Send me a PDF report. I'll split each page and reply with one slide script per message.\n"
+        "When a video is ready, confirm YouTube uploads with /upload_yes or cancel with /upload_no.",
     )
+
+
+async def _handle_upload_yes(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    chat_id = update.effective_chat.id if update.effective_chat else None
+    if chat_id is None:
+        return
+    await _process_upload_confirmation(context, chat_id, approved=True)
+
+
+async def _handle_upload_no(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    chat_id = update.effective_chat.id if update.effective_chat else None
+    if chat_id is None:
+        return
+    await _process_upload_confirmation(context, chat_id, approved=False)
 
 
 async def _handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     chat_id = update.effective_chat.id if update.effective_chat else None
     if chat_id is None:
+        return
+    message_text = (update.effective_message.text or "").strip().lower()
+    if context.chat_data.get(PENDING_UPLOAD_KEY) and message_text in {"yes", "y", "no", "n"}:
+        await _process_upload_confirmation(
+            context, chat_id, approved=message_text in {"yes", "y"}
+        )
         return
     await _send_message(context, chat_id, "Please upload a PDF document to process.")
 
@@ -840,6 +909,8 @@ def _build_application() -> Application:
     application = ApplicationBuilder().token(bot_token).build()
     application.add_error_handler(_handle_error)
     application.add_handler(CommandHandler("start", _handle_start))
+    application.add_handler(CommandHandler("upload_yes", _handle_upload_yes))
+    application.add_handler(CommandHandler("upload_no", _handle_upload_no))
     application.add_handler(MessageHandler(_get_video_message_filter(), _handle_video))
     application.add_handler(MessageHandler(filters.Document.PDF, _handle_pdf))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, _handle_text))
