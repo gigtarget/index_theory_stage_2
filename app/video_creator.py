@@ -306,16 +306,21 @@ async def run_ffmpeg_with_telegram_progress(
 async def create_slide_video(
     *,
     image_bytes: bytes,
-    audio_path: Path,
+    audio_path: Path | None,
     out_path: Path,
     chat_id: int,
     bot: Bot,
     fps: int = 30,
+    fallback_duration: float = 6.0,
 ) -> None:
     ensure_dir(out_path.parent)
     image_path = out_path.with_suffix(".png")
     write_bytes(image_path, image_bytes)
-    duration = await asyncio.to_thread(probe_duration_seconds, audio_path)
+    has_audio = audio_path is not None and audio_path.exists()
+    if has_audio:
+        duration = await asyncio.to_thread(probe_duration_seconds, audio_path)
+    else:
+        duration = fallback_duration
     target = duration + 0.05
     total_duration_ms = int(duration * 1000)
     cmd = [
@@ -327,29 +332,38 @@ async def create_slide_video(
         "1",
         "-i",
         str(image_path),
-        "-i",
-        str(audio_path),
-        "-t",
-        f"{target:.3f}",
-        "-c:v",
-        "libx264",
-        "-tune",
-        "stillimage",
-        "-pix_fmt",
-        "yuv420p",
-        "-c:a",
-        "aac",
-        "-b:a",
-        "192k",
-        "-af",
-        "aresample=async=1:first_pts=0",
-        "-shortest",
-        "-avoid_negative_ts",
-        "make_zero",
-        "-movflags",
-        "+faststart",
-        str(out_path),
     ]
+    if has_audio and audio_path is not None:
+        cmd.extend(["-i", str(audio_path)])
+    cmd.extend(
+        [
+            "-t",
+            f"{target:.3f}",
+            "-c:v",
+            "libx264",
+            "-tune",
+            "stillimage",
+            "-pix_fmt",
+            "yuv420p",
+            "-avoid_negative_ts",
+            "make_zero",
+            "-movflags",
+            "+faststart",
+        ]
+    )
+    if has_audio:
+        cmd.extend(
+            [
+                "-c:a",
+                "aac",
+                "-b:a",
+                "192k",
+                "-af",
+                "aresample=async=1:first_pts=0",
+                "-shortest",
+            ]
+        )
+    cmd.append(str(out_path))
     try:
         await run_ffmpeg_with_telegram_progress(
             cmd,
