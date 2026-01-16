@@ -38,6 +38,7 @@ from app.script_generator import (
 from app.text_postprocess import format_allcaps_words
 from app.tts import prepare_tts_payload, synthesize_tts_to_file
 from app.video_creator import VideoMergeError, create_slide_video, merge_videos_concat
+from app.youtube_description import build_description_static, build_dynamic_description
 from app.youtube_uploader import (
     DEFAULT_TAGS,
     build_description,
@@ -106,6 +107,25 @@ def _get_tts_keep_files() -> bool:
         "yes",
         "y",
     }
+
+
+def _get_default_tts_enabled() -> bool:
+    return os.environ.get("TTS_ENABLED_DEFAULT", "1").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "y",
+    }
+
+
+def _get_image_only_duration_seconds() -> float:
+    raw = os.environ.get("IMAGE_ONLY_DURATION_SECONDS", "6")
+    try:
+        value = float(raw)
+    except ValueError:
+        logger.warning("Invalid IMAGE_ONLY_DURATION_SECONDS=%s; using 6s", raw)
+        return 6.0
+    return value if value > 0 else 6.0
 
 
 def _get_tts_model() -> str:
@@ -274,7 +294,9 @@ def _format_report_date(report_date: datetime | None) -> str:
 
 
 def _build_youtube_upload_payload(
-    final_video_path: Path, report_date: datetime | None
+    final_video_path: Path,
+    report_date: datetime | None,
+    full_script_path: Path | None = None,
 ) -> dict[str, object]:
     delay_raw = os.environ.get("YT_SCHEDULE_DELAY_MINUTES", "60")
     try:
@@ -286,14 +308,24 @@ def _build_youtube_upload_payload(
         delay_minutes = 60
     date_str = _format_report_date(report_date)
     title = f"Post Market Report {date_str} | Jatin Dhiman | Nifty 50 | Bank Nifty"
-    description = build_description(date_str)
+    description_mode = os.environ.get("YT_DESCRIPTION_MODE", "static").strip().lower()
+    if description_mode == "dynamic":
+        full_script_text = ""
+        if full_script_path and full_script_path.exists():
+            full_script_text = full_script_path.read_text(encoding="utf-8")
+        if full_script_text:
+            description = build_dynamic_description(date_str, full_script_text)
+        else:
+            description = build_description_static(date_str)
+    else:
+        description = build_description(date_str)
     tags_env = os.environ.get("YT_KEYWORDS")
     tags = DEFAULT_TAGS
     if tags_env:
         tags = [tag.strip() for tag in tags_env.split(",") if tag.strip()]
     category_id = os.environ.get("YT_CATEGORY", "22")
     publish_at = datetime.now(timezone.utc) + timedelta(minutes=delay_minutes)
-    return {
+    payload = {
         "video_path": str(final_video_path),
         "title": title,
         "description": description,
@@ -302,12 +334,20 @@ def _build_youtube_upload_payload(
         "publish_at": publish_at.isoformat(),
         "delay_minutes": delay_minutes,
     }
+    if full_script_path:
+        payload["full_script_path"] = str(full_script_path)
+    return payload
 
 
 async def _queue_youtube_upload_confirmation(
     context: ContextTypes.DEFAULT_TYPE, chat_id: int, payload: dict[str, object]
 ) -> None:
     publish_at = datetime.fromisoformat(str(payload["publish_at"]))
+    description = str(payload.get("description", ""))
+    preview_text = description[:300]
+    if len(description) > 300:
+        preview_text = f"{preview_text}..."
+    description_mode = os.environ.get("YT_DESCRIPTION_MODE", "static").strip().lower()
     logger.info(
         "YouTube upload settings: delay_minutes=%s category_id=%s tags_count=%s publish_at=%s",
         payload["delay_minutes"],
@@ -321,7 +361,9 @@ async def _queue_youtube_upload_confirmation(
         chat_id,
         "YouTube upload is ready. Reply with /upload_yes to proceed or /upload_no to cancel.\n"
         f"Title: {payload['title']}\n"
-        f"Scheduled publish time (UTC): {publish_at.strftime('%Y-%m-%dT%H:%M:%SZ')}",
+        f"Scheduled publish time (UTC): {publish_at.strftime('%Y-%m-%dT%H:%M:%SZ')}\n"
+        f"Description mode: {description_mode}\n"
+        f"Description preview: {preview_text}",
     )
 
 
@@ -330,6 +372,8 @@ async def _maybe_upload_to_youtube(
     chat_id: int,
     final_video_path: Path,
     report_date: datetime | None,
+    *,
+    full_script_path: Path | None = None,
 ) -> None:
     if os.environ.get("YT_UPLOAD_ON_COMPLETE") != "1":
         logger.info("YT_UPLOAD_ON_COMPLETE not enabled; skipping YouTube upload.")
@@ -342,7 +386,11 @@ async def _maybe_upload_to_youtube(
     if decode_b64_secrets_to_tmp() is None:
         logger.warning("YouTube upload skipped due to missing credentials.")
         return
-    payload = _build_youtube_upload_payload(final_video_path, report_date)
+    payload = _build_youtube_upload_payload(
+        final_video_path,
+        report_date,
+        full_script_path,
+    )
     await _queue_youtube_upload_confirmation(context, chat_id, payload)
 
 
@@ -532,7 +580,8 @@ async def _generate_and_send_scripts(
         total_slides = len(images)
         client = _build_client()
         scripts_dir, original_dir = create_scripts_job_dir()
-        tts_enabled = _get_tts_enabled()
+        full_script_path: Path | None = None
+        tts_enabled = _ensure_tts_preference(context)
         tts_keep_files = _get_tts_keep_files()
         tts_model = _get_tts_model()
         tts_voice = _get_tts_voice()
@@ -545,6 +594,7 @@ async def _generate_and_send_scripts(
         video_enabled = _get_enable_slide_videos()
         video_fps = _get_video_fps()
         video_keep_files = _get_video_keep_files()
+        image_only_duration = _get_image_only_duration_seconds()
         clip_paths: list[Path] = []
         if video_enabled and watermarked_images is None:
             logger.warning("Video generation enabled, but no watermarked images provided.")
@@ -561,7 +611,16 @@ async def _generate_and_send_scripts(
                 ),
             )
 
+        if not tts_enabled:
+            await _send_message(
+                context,
+                chat_id,
+                "Audio generation is OFF for this run (saving TTS credits). "
+                f"Videos will be image-only with {image_only_duration:.0f}s per slide.",
+            )
+
         for index, image in enumerate(images, start=1):
+            tts_result_path: Path | None = None
             logger.info("Generating script for slide %s/%s", index, total_slides)
             if output_mode in ["slides", "both"]:
                 await _send_message(
@@ -650,55 +709,68 @@ async def _generate_and_send_scripts(
                         speed=tts_speed,
                         instructions=tts_instructions,
                     )
-                    if tts_result:
-                        with open(tts_result, "rb") as audio_file:
-                            await context.bot.send_audio(
-                                chat_id=chat_id,
-                                audio=audio_file,
-                                filename=tts_filename,
-                                caption=f"Audio | Slide {index}",
-                            )
-                        await asyncio.sleep(tts_delay_seconds)
-                        audio_path = Path(tts_result)
-                        if (
-                            video_enabled
-                            and watermarked_images is not None
-                            and index <= len(watermarked_images)
-                            and audio_path.exists()
-                        ):
-                            job_root = scripts_dir.parent.parent
-                            videos_dir = job_root / "videos"
-                            videos_dir.mkdir(parents=True, exist_ok=True)
-                            await _send_message(
-                                context,
-                                chat_id,
-                                f"Creating video clip {index}/{total_slides}...",
-                            )
-                            clip_path = videos_dir / f"clip_{index:02d}.mp4"
-                            await create_slide_video(
-                                image_bytes=watermarked_images[index - 1],
-                                audio_path=audio_path,
-                                out_path=clip_path,
-                                chat_id=chat_id,
-                                bot=context.bot,
-                                fps=video_fps,
-                            )
-                            clip_paths.append(clip_path)
                 except Exception as exc:  # pragma: no cover - logged for robustness
                     logger.exception("Failed to send TTS audio for slide %s: %s", index, exc)
-                finally:
-                    if not tts_keep_files and tts_path.exists():
-                        try:
-                            tts_path.unlink()
-                        except Exception:
-                            logger.exception("Failed to delete TTS file at %s", tts_path)
+
+                if tts_result:
+                    tts_result_path = Path(tts_result)
+                    with open(tts_result, "rb") as audio_file:
+                        await context.bot.send_audio(
+                            chat_id=chat_id,
+                            audio=audio_file,
+                            filename=tts_filename,
+                            caption=f"Audio | Slide {index}",
+                        )
+                    await asyncio.sleep(tts_delay_seconds)
+                else:
+                    logger.warning(
+                        "TTS disabled for remaining slides after failure on slide %s.",
+                        index,
+                    )
+                    tts_enabled = False
+
+            if video_enabled and watermarked_images is not None and index <= len(watermarked_images):
+                job_root = scripts_dir.parent.parent
+                videos_dir = job_root / "videos"
+                videos_dir.mkdir(parents=True, exist_ok=True)
+                await _send_message(
+                    context,
+                    chat_id,
+                    f"Creating video clip {index}/{total_slides}...",
+                )
+                clip_path = videos_dir / f"clip_{index:02d}.mp4"
+                audio_path = None
+                if tts_result_path and tts_result_path.exists():
+                    audio_path = tts_result_path
+                await create_slide_video(
+                    image_bytes=watermarked_images[index - 1],
+                    audio_path=audio_path,
+                    out_path=clip_path,
+                    chat_id=chat_id,
+                    bot=context.bot,
+                    fps=video_fps,
+                    fallback_duration=image_only_duration,
+                )
+                clip_paths.append(clip_path)
+            if tts_result_path and not tts_keep_files:
+                try:
+                    tts_result_path.unlink()
+                except Exception:
+                    logger.exception("Failed to delete TTS file at %s", tts_result_path)
+
+        full_payload = "\n".join(scripts)
+        if _get_humanize_full_script() and voice_style == "youtube":
+            full_payload = await asyncio.to_thread(
+                humanize_full_script, full_payload, client=client, model_name=model_name
+            )
+        if scripts_dir:
+            job_root = scripts_dir.parent.parent
+            scripts_output_dir = job_root / "scripts"
+            scripts_output_dir.mkdir(parents=True, exist_ok=True)
+            full_script_path = scripts_output_dir / "full_script.txt"
+            full_script_path.write_text(full_payload, encoding="utf-8")
 
         if output_mode in ["full", "both"]:
-            full_payload = "\n".join(scripts)
-            if _get_humanize_full_script() and voice_style == "youtube":
-                full_payload = await asyncio.to_thread(
-                    humanize_full_script, full_payload, client=client, model_name=model_name
-                )
             await _send_long(context, chat_id, full_payload)
 
         if clip_paths:
@@ -723,7 +795,13 @@ async def _generate_and_send_scripts(
                     filename="index_theory_final.mp4",
                     caption="Final merged video",
                 )
-            await _maybe_upload_to_youtube(context, chat_id, merged_path, report_date)
+            await _maybe_upload_to_youtube(
+                context,
+                chat_id,
+                merged_path,
+                report_date,
+                full_script_path=full_script_path if scripts_dir else None,
+            )
             if not video_keep_files:
                 for clip_path in clip_paths:
                     try:
@@ -866,6 +944,43 @@ async def _handle_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     )
 
 
+def _ensure_tts_preference(context: ContextTypes.DEFAULT_TYPE) -> bool:
+    if "tts_enabled" not in context.user_data:
+        context.user_data["tts_enabled"] = _get_default_tts_enabled()
+    return bool(context.user_data["tts_enabled"])
+
+
+async def _handle_audio_on(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    chat_id = update.effective_chat.id if update.effective_chat else None
+    if chat_id is None:
+        return
+    context.user_data["tts_enabled"] = True
+    await _send_message(context, chat_id, "Audio generation is ON for this run.")
+
+
+async def _handle_audio_off(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    chat_id = update.effective_chat.id if update.effective_chat else None
+    if chat_id is None:
+        return
+    context.user_data["tts_enabled"] = False
+    duration = _get_image_only_duration_seconds()
+    await _send_message(
+        context,
+        chat_id,
+        "Audio generation is OFF for this run (saving TTS credits). "
+        f"Videos will be image-only with {duration:.0f}s per slide.",
+    )
+
+
+async def _handle_audio_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    chat_id = update.effective_chat.id if update.effective_chat else None
+    if chat_id is None:
+        return
+    enabled = _ensure_tts_preference(context)
+    status = "ON" if enabled else "OFF"
+    await _send_message(context, chat_id, f"Audio generation is currently {status}.")
+
+
 async def _handle_upload_yes(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     chat_id = update.effective_chat.id if update.effective_chat else None
     if chat_id is None:
@@ -909,6 +1024,9 @@ def _build_application() -> Application:
     application = ApplicationBuilder().token(bot_token).build()
     application.add_error_handler(_handle_error)
     application.add_handler(CommandHandler("start", _handle_start))
+    application.add_handler(CommandHandler("audio_on", _handle_audio_on))
+    application.add_handler(CommandHandler("audio_off", _handle_audio_off))
+    application.add_handler(CommandHandler("audio_status", _handle_audio_status))
     application.add_handler(CommandHandler("upload_yes", _handle_upload_yes))
     application.add_handler(CommandHandler("upload_no", _handle_upload_no))
     application.add_handler(MessageHandler(_get_video_message_filter(), _handle_video))
