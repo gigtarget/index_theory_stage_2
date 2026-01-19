@@ -16,6 +16,12 @@ DEFAULT_MAX_WORDS = 90
 SLIDE_ONE_MIN_WORDS = 18
 SLIDE_ONE_MAX_WORDS = 40
 DEFAULT_MODEL_NAME = "gpt-5.2"
+NUMERIC_DENSE_TOKEN_THRESHOLD = 25
+NUMERIC_DENSE_RATIO_THRESHOLD = 0.25
+NUMERIC_DENSE_CHAR_RATIO_THRESHOLD = 0.16
+NUMERIC_DENSE_MAX_NUMBERS = 6
+NUMERIC_DENSE_TARGET_WORDS = 45
+NUMERIC_DENSE_MAX_WORDS = 65
 
 BASE_SYSTEM_PROMPT = """
 You are a professional video voiceover writer for Indian retail traders.
@@ -97,6 +103,140 @@ def _strip_leading_now(text: str) -> str:
 
 def _digit_sequences(text: str) -> List[str]:
     return re.findall(r"\d[\d,.]*", text)
+
+
+def _get_numeric_dense_thresholds() -> tuple[int, float, float]:
+    raw_token = os.environ.get(
+        "NUMERIC_DENSE_TOKEN_THRESHOLD", str(NUMERIC_DENSE_TOKEN_THRESHOLD)
+    )
+    raw_ratio = os.environ.get(
+        "NUMERIC_DENSE_RATIO_THRESHOLD", str(NUMERIC_DENSE_RATIO_THRESHOLD)
+    )
+    raw_char_ratio = os.environ.get(
+        "NUMERIC_DENSE_CHAR_RATIO_THRESHOLD", str(NUMERIC_DENSE_CHAR_RATIO_THRESHOLD)
+    )
+    try:
+        token_threshold = max(0, int(raw_token))
+    except ValueError:
+        token_threshold = NUMERIC_DENSE_TOKEN_THRESHOLD
+    try:
+        ratio_threshold = max(0.0, float(raw_ratio))
+    except ValueError:
+        ratio_threshold = NUMERIC_DENSE_RATIO_THRESHOLD
+    try:
+        char_ratio_threshold = max(0.0, float(raw_char_ratio))
+    except ValueError:
+        char_ratio_threshold = NUMERIC_DENSE_CHAR_RATIO_THRESHOLD
+    return token_threshold, ratio_threshold, char_ratio_threshold
+
+
+def _get_numeric_dense_limits() -> tuple[int, int, int]:
+    raw_max_numbers = os.environ.get(
+        "NUMERIC_DENSE_MAX_NUMBERS", str(NUMERIC_DENSE_MAX_NUMBERS)
+    )
+    raw_target_words = os.environ.get(
+        "NUMERIC_DENSE_TARGET_WORDS", str(NUMERIC_DENSE_TARGET_WORDS)
+    )
+    raw_max_words = os.environ.get(
+        "NUMERIC_DENSE_MAX_WORDS", str(NUMERIC_DENSE_MAX_WORDS)
+    )
+    try:
+        max_numbers = max(1, int(raw_max_numbers))
+    except ValueError:
+        max_numbers = NUMERIC_DENSE_MAX_NUMBERS
+    try:
+        target_words = max(10, int(raw_target_words))
+    except ValueError:
+        target_words = NUMERIC_DENSE_TARGET_WORDS
+    try:
+        max_words = max(target_words, int(raw_max_words))
+    except ValueError:
+        max_words = NUMERIC_DENSE_MAX_WORDS
+    return max_numbers, target_words, max_words
+
+
+def _numeric_token_stats(text: str) -> tuple[int, float, float]:
+    tokens = re.findall(r"[A-Za-z0-9][A-Za-z0-9,./%+-]*", text)
+    total_tokens = len(tokens)
+    numeric_tokens = [token for token in tokens if any(ch.isdigit() for ch in token)]
+    numeric_token_count = len(numeric_tokens)
+    token_ratio = (numeric_token_count / total_tokens) if total_tokens else 0.0
+    total_chars = len(text)
+    digit_chars = sum(ch.isdigit() for ch in text)
+    char_ratio = (digit_chars / total_chars) if total_chars else 0.0
+    return numeric_token_count, token_ratio, char_ratio
+
+
+def is_numeric_dense_text(text: str) -> bool:
+    token_threshold, ratio_threshold, char_ratio_threshold = _get_numeric_dense_thresholds()
+    numeric_token_count, token_ratio, char_ratio = _numeric_token_stats(text)
+    return (
+        numeric_token_count >= token_threshold
+        or token_ratio >= ratio_threshold
+        or char_ratio >= char_ratio_threshold
+    )
+
+
+def _count_numbers(text: str) -> int:
+    return len(_digit_sequences(text))
+
+
+def _prune_numeric_sentences(text: str, max_numbers: int) -> str:
+    if _count_numbers(text) <= max_numbers:
+        return text
+    sentences = [sentence for sentence in re.split(r"(?<=[.!?])\s+", text.strip()) if sentence]
+    if not sentences:
+        return text
+    counts = [len(_digit_sequences(sentence)) for sentence in sentences]
+    total = sum(counts)
+    if total <= max_numbers:
+        return text
+    removal_order = sorted(range(len(sentences)), key=lambda idx: counts[idx], reverse=True)
+    keep = [True] * len(sentences)
+    for idx in removal_order:
+        if total <= max_numbers:
+            break
+        if counts[idx] == 0:
+            continue
+        keep[idx] = False
+        total -= counts[idx]
+    remaining = [sentence for i, sentence in enumerate(sentences) if keep[i]]
+    if not remaining:
+        return sentences[0].strip()
+    return " ".join(remaining).strip()
+
+
+def _rewrite_numeric_dense_script(
+    script: str,
+    *,
+    max_numbers: int,
+    page_text: str,
+    client: OpenAI,
+    model_name: str,
+) -> str:
+    instruction = (
+        "Rewrite the narration to reduce numeric clutter. "
+        f"Mention at most {max_numbers} numbers total. "
+        "Keep any numbers you do mention EXACT. "
+        "Do NOT add new numbers or facts. "
+        "Do NOT read tables or long lists; summarize at a high level. "
+        "Return ONLY the narration text."
+    )
+    result = client.chat.completions.create(
+        model=model_name,
+        messages=[
+            {"role": "system", "content": instruction},
+            {"role": "user", "content": script},
+        ],
+    )
+    rewritten = (result.choices[0].message.content or "").strip()
+    allowed_numbers = set(_digit_sequences(page_text))
+    output_numbers = set(_digit_sequences(rewritten))
+    if allowed_numbers and not output_numbers.issubset(allowed_numbers):
+        logger.warning("Numeric dense rewrite introduced numbers not in page text.")
+        return script
+    rewritten = _prune_numeric_sentences(rewritten, max_numbers)
+    return rewritten
 
 
 def _remove_repeated_phrases(text: str, phrases: List[str]) -> str:
@@ -193,9 +333,12 @@ def generate_script_for_slide(
     target_words: int,
     max_words: int,
     scripts_dir: Optional[Path] = None,
+    is_numeric_dense: bool = False,
+    page_text: str = "",
 ) -> str:
     active_client = client or _build_client()
     voice_style = _get_voice_style()
+    max_numbers, dense_target_words, dense_max_words = _get_numeric_dense_limits()
 
     if slide_index == 1 and voice_style != "youtube":
         slide_target_words = max(
@@ -222,8 +365,8 @@ def generate_script_for_slide(
         script = "\n".join(line for line in slide_lines if line)
         script, _ = _enforce_word_limit(script, SLIDE_ONE_MAX_WORDS)
     else:
-        slide_target_words = target_words
-        slide_max_words = max_words
+        slide_target_words = dense_target_words if is_numeric_dense else target_words
+        slide_max_words = dense_max_words if is_numeric_dense else max_words
         if slide_index == total_slides:
             body_instruction = (
                 "Provide 2-4 short sentences strictly from this slide. "
@@ -233,6 +376,11 @@ def generate_script_for_slide(
             body_instruction = (
                 "Write 2-4 short sentences from only the slide content. "
                 "Do NOT include any greeting, opener, transition, or CTA."
+            )
+        if is_numeric_dense:
+            body_instruction = (
+                f"{body_instruction} Summarize at a high level; do NOT read tables. "
+                f"Mention at most {max_numbers} numbers total, keeping those numbers exact."
             )
         body = _generate_slide_body(
             image,
@@ -249,6 +397,16 @@ def generate_script_for_slide(
                 "Hit the bell for updates.",
             ]
             script = f"{script}\n" + "\n".join(cta_lines)
+        if is_numeric_dense and _count_numbers(script) > max_numbers:
+            script = _rewrite_numeric_dense_script(
+                script,
+                max_numbers=max_numbers,
+                page_text=page_text,
+                client=active_client,
+                model_name=model_name,
+            )
+            if _count_numbers(script) > max_numbers:
+                script = _prune_numeric_sentences(script, max_numbers)
 
     if scripts_dir is not None:
         scripts_dir = Path(scripts_dir)
@@ -265,6 +423,7 @@ def generate_script_for_slide(
             "word_count": _word_count(script),
             "target_words": slide_target_words,
             "max_words": slide_max_words,
+            "is_numeric_dense": is_numeric_dense,
         }
         meta_path.write_text(
             json.dumps(meta_payload, indent=2, ensure_ascii=False), encoding="utf-8"
@@ -363,11 +522,13 @@ def generate_scripts_from_images(
     model_name: str,
     target_words: int = DEFAULT_TARGET_WORDS,
     max_words: int = DEFAULT_MAX_WORDS,
+    page_texts: Optional[List[str]] = None,
 ) -> Tuple[List[str], Path]:
     client = _build_client()
     scripts: List[str] = []
     total_slides = len(images)
     scripts_dir, _ = create_scripts_job_dir()
+    page_texts = page_texts or []
 
     for index, image in enumerate(images, start=1):
         logger.info("Generating script for slide %s/%s", index, total_slides)
@@ -380,6 +541,10 @@ def generate_scripts_from_images(
             target_words=target_words,
             max_words=max_words,
             scripts_dir=scripts_dir,
+            is_numeric_dense=is_numeric_dense_text(page_texts[index - 1])
+            if index - 1 < len(page_texts)
+            else False,
+            page_text=page_texts[index - 1] if index - 1 < len(page_texts) else "",
         )
         scripts.append(script)
 

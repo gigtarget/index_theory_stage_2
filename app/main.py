@@ -22,6 +22,7 @@ from telegram.ext import (
 
 from app.pdf_processor import (
     WATERMARK_PADDING_PX,
+    extract_pdf_texts,
     save_temp_pdf,
     split_pdf_to_images,
     watermark_images_with_logo,
@@ -32,6 +33,7 @@ from app.script_generator import (
     _build_client,
     create_scripts_job_dir,
     generate_script_for_slide,
+    is_numeric_dense_text,
     generate_viewer_question,
     humanize_full_script,
 )
@@ -293,6 +295,16 @@ def _format_report_date(report_date: datetime | None) -> str:
     return local_date.strftime("%d %b %Y")
 
 
+def _resolve_description_mode(full_script_path: Path | None) -> str:
+    raw = os.environ.get("YT_DESCRIPTION_MODE")
+    if raw:
+        mode = raw.strip().lower()
+        return "dynamic" if mode == "dynamic" else "static"
+    if full_script_path and full_script_path.exists():
+        return "dynamic"
+    return "static"
+
+
 def _build_youtube_upload_payload(
     final_video_path: Path,
     report_date: datetime | None,
@@ -308,7 +320,7 @@ def _build_youtube_upload_payload(
         delay_minutes = 60
     date_str = _format_report_date(report_date)
     title = f"Post Market Report {date_str} | Jatin Dhiman | Nifty 50 | Bank Nifty"
-    description_mode = os.environ.get("YT_DESCRIPTION_MODE", "static").strip().lower()
+    description_mode = _resolve_description_mode(full_script_path)
     if description_mode == "dynamic":
         full_script_text = ""
         if full_script_path and full_script_path.exists():
@@ -329,6 +341,7 @@ def _build_youtube_upload_payload(
         "video_path": str(final_video_path),
         "title": title,
         "description": description,
+        "description_mode": description_mode,
         "tags": tags,
         "category_id": category_id,
         "publish_at": publish_at.isoformat(),
@@ -347,7 +360,7 @@ async def _queue_youtube_upload_confirmation(
     preview_text = description[:300]
     if len(description) > 300:
         preview_text = f"{preview_text}..."
-    description_mode = os.environ.get("YT_DESCRIPTION_MODE", "static").strip().lower()
+    description_mode = str(payload.get("description_mode", "static"))
     logger.info(
         "YouTube upload settings: delay_minutes=%s category_id=%s tags_count=%s publish_at=%s",
         payload["delay_minutes"],
@@ -556,6 +569,7 @@ async def _generate_and_send_scripts(
     images: list[bytes],
     *,
     watermarked_images: list[bytes] | None = None,
+    page_texts: list[str] | None = None,
     report_date: datetime | None = None,
 ) -> None:
     if not os.environ.get("OPENAI_API_KEY"):
@@ -619,6 +633,7 @@ async def _generate_and_send_scripts(
                 f"Videos will be image-only with {image_only_duration:.0f}s per slide.",
             )
 
+        page_texts = page_texts or []
         for index, image in enumerate(images, start=1):
             tts_result_path: Path | None = None
             logger.info("Generating script for slide %s/%s", index, total_slides)
@@ -628,6 +643,8 @@ async def _generate_and_send_scripts(
                     chat_id,
                     f"===== SLIDE {index}/{total_slides}: ORIGINAL =====",
                 )
+            page_text = page_texts[index - 1] if index - 1 < len(page_texts) else ""
+            is_numeric_dense = is_numeric_dense_text(page_text) if page_text else False
             script = await asyncio.to_thread(
                 generate_script_for_slide,
                 image,
@@ -638,6 +655,8 @@ async def _generate_and_send_scripts(
                 target_words=target_words,
                 max_words=max_words,
                 scripts_dir=scripts_dir,
+                is_numeric_dense=is_numeric_dense,
+                page_text=page_text,
             )
 
             if index == total_slides and voice_style != "youtube":
@@ -866,6 +885,7 @@ async def _process_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             await _send_message(context, chat_id, "Splitting PDF into slide images...")
         )
         temp_pdf_path = None
+        page_texts: list[str] = []
         try:
             temp_pdf = save_temp_pdf(bytes(pdf_bytes))
             temp_pdf_path = temp_pdf.name
@@ -876,6 +896,7 @@ async def _process_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                 len(pdf_bytes),
             )
             images = split_pdf_to_images(temp_pdf_path)
+            page_texts = extract_pdf_texts(temp_pdf_path)
         finally:
             if temp_pdf_path and os.path.exists(temp_pdf_path):
                 try:
@@ -884,6 +905,16 @@ async def _process_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                     logger.exception("Failed to remove temp PDF at %s", temp_pdf_path)
 
         logger.info("PDF page count=%s", len(images))
+        if len(page_texts) != len(images):
+            logger.warning(
+                "PDF page text count mismatch: texts=%s images=%s",
+                len(page_texts),
+                len(images),
+            )
+            if len(page_texts) < len(images):
+                page_texts.extend([""] * (len(images) - len(page_texts)))
+            else:
+                page_texts = page_texts[: len(images)]
         logo_path = (
             Path(__file__).resolve().parents[1]
             / "material"
@@ -908,6 +939,7 @@ async def _process_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                 chat_id,
                 images,
                 watermarked_images=watermarked_images,
+                page_texts=page_texts,
                 report_date=report_date,
             )
         )
