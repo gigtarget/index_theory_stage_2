@@ -22,6 +22,16 @@ def split_pdf_to_images(pdf_path: str) -> List[bytes]:
     return images
 
 
+def extract_pdf_texts(pdf_path: str) -> List[str]:
+    """Extract per-page text from a PDF without OCR."""
+    page_texts: List[str] = []
+    with fitz.open(pdf_path) as doc:
+        for page_index in range(doc.page_count):
+            page = doc.load_page(page_index)
+            page_texts.append(page.get_text("text") or "")
+    return page_texts
+
+
 def save_temp_pdf(content: bytes) -> tempfile.NamedTemporaryFile:
     temp_file = tempfile.NamedTemporaryFile(suffix=".pdf", delete=False)
     temp_file.write(content)
